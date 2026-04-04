@@ -1,6 +1,6 @@
 ---
 name: run-benchmark
-description: "Run Intel DMR platform benchmarks. Use when: running benchmarks, measuring performance, validating platform, checking frequency, memory latency, memory bandwidth, AMX throughput, wakeup latency, core-to-core latency, turbo curve, NUMA, C-states, preflight checks. Invoke with a benchmark name or 'all'."
+description: "Run Intel DMR platform benchmarks. Use when: running benchmarks, measuring performance, validating platform, checking frequency, memory latency, memory bandwidth, AMX throughput, wakeup latency, core-to-core latency, turbo curve, NUMA, C-states, preflight checks, 3-tier workload sizing, app server validation, database server sizing, AI inference readiness, platform acceptance testing, full system characterization, benchmarking a new server. Invoke with a benchmark name or 'all'."
 argument-hint: "[benchmark-name|all|preflight]"
 disable-model-invocation: false
 allowed-tools: Bash
@@ -27,6 +27,16 @@ allowed-tools: Bash
 | `cpu` | preflight + max-freq + turbo-curve + core-to-core |
 | `memory` | memory-latency + memory-bandwidth |
 | `all` | All applicable single-node benchmarks |
+
+## Variables
+
+| Variable | Description | Example |
+|---|---|---|
+| `$LAB_HOST` | SSH target alias from `~/.ssh/config` | `lab-target` |
+| `$OUTPUT_DIR` | Remote results directory | `/tmp/benchmarks/2026-04-04/` |
+| `$NPROC` | Core count discovered at runtime | `32` |
+
+Set by the agent before invoking any sub-skill. See `AGENT.md` for how these are populated.
 
 ## How to Run
 

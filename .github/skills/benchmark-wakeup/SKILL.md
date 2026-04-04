@@ -1,6 +1,6 @@
 ---
 name: benchmark-wakeup
-description: "Run DMR wakeup latency benchmark using Intel wult tool. Use when: measuring C-state wakeup latency, measuring interrupt latency, wult benchmark, C6 exit time, real-time latency, measuring how fast cores wake from sleep."
+description: "Run DMR wakeup latency benchmark using Intel wult tool. Use when: measuring C-state wakeup latency, measuring interrupt latency, wult benchmark, C6 exit time, real-time latency, measuring how fast cores wake from sleep, power management validation, low-latency trading system, financial systems benchmark, real-time workload sizing, interrupt handling performance, sleep state validation."
 argument-hint: "[short|full]"
 allowed-tools: Bash
 ---
@@ -12,6 +12,16 @@ Argument: `short` (~5 min, 100k datapoints) or `full` (default, ~35 min, 1M data
 
 **Do NOT use cyclictest** — it measures OS scheduling latency, not C-state exit.
 GNR reference (wult): median 1.59 µs, p90 1.96 µs, max 10.59 µs.
+
+## Variables
+
+| Variable | Description | Example |
+|---|---|---|
+| `$LAB_HOST` | SSH target alias from `~/.ssh/config` | `lab-target` |
+| `$OUTPUT_DIR` | Remote results directory | `/tmp/benchmarks/2026-04-04/` |
+| `$TEST_CPU` | Logical CPU to measure (default: 1) | `1` |
+
+Set by the agent before invoking this skill. See `AGENT.md`.
 
 ## Step 1 — Install wult (if not already present)
 ```bash
@@ -44,7 +54,7 @@ cpupower idle-info   # confirm C1E, C6 are available
 ```bash
 lscpu -e=CPU,NODE,SOCKET   # pick a mostly idle logical CPU
 # BKM example used CPU 10 on GNR; use CPU 1 on DMR (single-socket)
-TEST_CPU=1
+TEST_CPU=${TEST_CPU:-1}
 ```
 
 ## Step 5 — Run benchmark

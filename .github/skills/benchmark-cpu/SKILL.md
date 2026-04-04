@@ -1,6 +1,6 @@
 ---
 name: benchmark-cpu
-description: "Run DMR CPU micro-benchmarks: max frequency, turbo curve, core-to-core latency. Use when: measuring CPU frequency, checking turbo boost, measuring core-to-core cache latency, validating CPU performance, running frequency sweep."
+description: "Run DMR CPU micro-benchmarks: max frequency, turbo curve, core-to-core latency. Use when: measuring CPU frequency, checking turbo boost, measuring core-to-core cache latency, validating CPU performance, running frequency sweep, app server sizing, web server validation, compute node readiness, HPC validation, single-threaded performance, multi-threaded scaling, latency-sensitive workload, frequency-sensitive application."
 argument-hint: "[max-freq|turbo-curve|core-to-core|all]"
 allowed-tools: Bash
 ---
@@ -9,6 +9,17 @@ allowed-tools: Bash
 
 Runs: max frequency test, turbo curve sweep, core-to-core latency.
 Argument: `$ARGUMENTS` — one of `max-freq`, `turbo-curve`, `core-to-core`, or `all` (default).
+
+## Variables
+
+| Variable | Description | Example |
+|---|---|---|
+| `$LAB_HOST` | SSH target alias from `~/.ssh/config` | `lab-target` |
+| `$OUTPUT_DIR` | Remote results directory | `/tmp/benchmarks/2026-04-04/` |
+| `$NPROC` | Core count discovered at runtime | `32` |
+| `$WORK_DIR` | Home directory on remote machine | `/root` |
+
+Set by the agent before invoking this skill. See `AGENT.md`.
 
 ## CRITICAL: DMR turbostat rule
 **Never measure idle cores.** DMR's C6 substates (C6A/C6S/C6SP) stop the TSC, causing turbostat exit 253. Always pin a busy loop to the CPU being measured.
@@ -50,18 +61,18 @@ sudo systemctl stop unattended-upgrades
 cpupower frequency-info   # confirm governor=performance, boost enabled
 
 # Build if needed (BKM: git clone + cargo build)
-ls /root/core-to-core-latency/target/release/core-to-core-latency 2>/dev/null || {
+ls ${WORK_DIR}/core-to-core-latency/target/release/core-to-core-latency 2>/dev/null || {
     which cargo || dnf install -y cargo rust
-    cd /root && git clone https://github.com/nviennot/core-to-core-latency.git
+    cd ${WORK_DIR} && git clone https://github.com/nviennot/core-to-core-latency.git
     cd core-to-core-latency && cargo build --release
 }
-C2C=/root/core-to-core-latency/target/release/core-to-core-latency
+C2C=${WORK_DIR}/core-to-core-latency/target/release/core-to-core-latency
 
 # Quick test (8 cores, ~30s)
 sudo $C2C 500 20 --cores 0,1,2,3,4,5,6,7 --csv | tee /tmp/c2c_quick.csv
 
 # Full 32-core matrix (~3 min) — BKM step 6: 1000 iterations, 300 samples
-sudo $C2C 1000 300 --cores $(seq -s, 0 31) --csv | tee /tmp/c2c_full.csv
+sudo $C2C 1000 300 --cores $(seq -s, 0 $((NPROC-1))) --csv | tee /tmp/c2c_full.csv
 ```
 Parse max off-diagonal. Pass ≤ 180 cycles. GNR: 63–71 cycles intra-SNC.
 

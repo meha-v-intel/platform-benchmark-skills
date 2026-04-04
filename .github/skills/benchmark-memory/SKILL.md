@@ -1,6 +1,6 @@
 ---
 name: benchmark-memory
-description: "Run DMR memory micro-benchmarks: memory latency via pointer-chasing (multichase), memory bandwidth via PKB multichase multiload, memory latency-bandwidth curve via MLC. Use when: measuring DRAM latency, measuring memory bandwidth, running MLC, checking memory subsystem performance, latency-bandwidth curve."
+description: "Run DMR memory micro-benchmarks: memory latency via pointer-chasing (multichase), memory bandwidth via PKB multichase multiload, memory latency-bandwidth curve via MLC. Use when: measuring DRAM latency, measuring memory bandwidth, running MLC, checking memory subsystem performance, latency-bandwidth curve, database server sizing, DB tier validation, in-memory database performance, caching layer benchmark, memory-intensive workload, data analytics platform, Redis-like workload."
 argument-hint: "[latency|bandwidth|latency-bw-curve|all]"
 allowed-tools: Bash
 ---
@@ -9,6 +9,17 @@ allowed-tools: Bash
 
 Runs memory latency (multichase), memory bandwidth (MLC), and latency-BW curve (MLC sweep).
 Argument: `$ARGUMENTS` — `latency`, `bandwidth`, `latency-bw-curve`, or `all` (default).
+
+## Variables
+
+| Variable | Description | Example |
+|---|---|---|
+| `$LAB_HOST` | SSH target alias from `~/.ssh/config` | `lab-target` |
+| `$OUTPUT_DIR` | Remote results directory | `/tmp/benchmarks/2026-04-04/` |
+| `$NPROC` | Core count discovered at runtime | `32` |
+| `$MLC_PATH` | Path to MLC binary on remote machine | `/root/mlc` |
+
+Set by the agent before invoking this skill. See `AGENT.md`.
 
 ## Prerequisites
 ```bash
@@ -40,9 +51,9 @@ GNR reference: 1T→16.3 GB/s, 8T→92.7 GB/s, 16T→110.7 GB/s. Full-system (48
 
 ```bash
 # Run sweep script (MAX_CORES=32 for this system)
-MLC=${MLC:-/root/mlc}
+MLC=${MLC_PATH:-/root/mlc}
 mkdir -p /data/mlc_res && rm -rf /data/mlc_res/*
-for i in $(seq 1 32); do
+for i in $(seq 1 $NPROC); do
     numactl -m 0 $MLC --loaded_latency -e -b1g -t50 -T -k"1-${i}" -d0 -W2 \
          >> /data/mlc_res/bw_mlc_${i}.log 2>&1 &
     sleep 20

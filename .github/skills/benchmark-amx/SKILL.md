@@ -1,6 +1,6 @@
 ---
 name: benchmark-amx
-description: "Run DMR AMX performance benchmark using oneDNN benchdnn. Use when: measuring AMX throughput, benchmarking BF16 TFLOPS, INT8 TOPS, testing matrix multiply performance, validating AMX tiles, AI inference baseline."
+description: "Run DMR AMX performance benchmark using oneDNN benchdnn. Use when: measuring AMX throughput, benchmarking BF16 TFLOPS, INT8 TOPS, testing matrix multiply performance, validating AMX tiles, AI inference baseline, deep learning inference, LLM serving, neural network throughput, GenAI workload, transformer model performance, AI accelerator validation, machine learning workload sizing."
 argument-hint: "[iso-core|full-system|all]"
 allowed-tools: Bash
 ---
@@ -10,13 +10,24 @@ allowed-tools: Bash
 Measures Intel AMX BF16 and INT8 throughput via oneDNN benchdnn convolution operator.
 Argument: `iso-core` (8C, matches GNR BKM), `full-system` (all 32C), or `all` (default: both).
 
+## Variables
+
+| Variable | Description | Example |
+|---|---|---|
+| `$LAB_HOST` | SSH target alias from `~/.ssh/config` | `lab-target` |
+| `$OUTPUT_DIR` | Remote results directory | `/tmp/benchmarks/2026-04-04/` |
+| `$NPROC` | Core count discovered at runtime | `32` |
+| `$WORK_DIR` | Home directory on remote machine | `/root` |
+
+Set by the agent before invoking this skill. See `AGENT.md`.
+
 ## Find / Build benchdnn
 ```bash
-BENCHDNN=$(find /root -name benchdnn -type f 2>/dev/null | head -1)
+BENCHDNN=$(find ${WORK_DIR:-/root} -name benchdnn -type f 2>/dev/null | head -1)
 if [ -z "$BENCHDNN" ]; then
     echo "Building oneDNN..."
     dnf install -y cmake gcc-c++ git
-    cd /root && git clone --depth 1 https://github.com/oneapi-src/oneDNN.git
+    cd ${WORK_DIR:-/root} && git clone --depth 1 https://github.com/oneapi-src/oneDNN.git
     mkdir -p oneDNN/build && cd oneDNN/build
     cmake .. -DCMAKE_BUILD_TYPE=Release -DDNNL_CPU_RUNTIME=OMP
     make -j$(nproc) benchdnn
@@ -74,7 +85,7 @@ GNR reference: BF16 ~4.2 TFLOPS, INT8 ~8.1 TOPS
 
 ## Full-system test (32 cores — BKM steps 7–8)
 ```bash
-export OMP_NUM_THREADS=32
+export OMP_NUM_THREADS=$NPROC
 export OMP_PROC_BIND=spread
 
 echo "=== BF16 full-system ==="

@@ -1,12 +1,21 @@
 ---
 name: benchmark-preflight
-description: "Run DMR platform preflight checks: NUMA check and C-state check. Use when: starting benchmarks, validating platform setup, checking NUMA topology, checking C-states, verifying intel_idle driver, pre-benchmark validation."
+description: "Run DMR platform preflight checks: NUMA check and C-state check. Use when: starting benchmarks, validating platform setup, checking NUMA topology, checking C-states, verifying intel_idle driver, pre-benchmark validation, checking if the platform is ready, system health check, first check before any workload, verify hardware configuration, is this machine ready to benchmark."
 allowed-tools: Bash
 ---
 
 # DMR Preflight Checks
 
 Run both checks and report. Always run preflight before any micro-benchmark.
+
+## Variables
+
+| Variable | Description | Example |
+|---|---|---|
+| `$LAB_HOST` | SSH target alias from `~/.ssh/config` | `lab-target` |
+| `$OUTPUT_DIR` | Remote results directory | `/tmp/benchmarks/2026-04-04/` |
+
+Set by the agent before invoking this skill. See `AGENT.md`.
 
 ## Step 1 — Install numactl if missing
 ```bash
