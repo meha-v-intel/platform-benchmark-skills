@@ -303,35 +303,14 @@ Overall Verdict : PASS/FAIL — <workload-specific assessment>
 
 ---
 
-## Phase 10: Commit Results to Repository
+## Phase 10: Save Results Locally
 
-After analysis is complete, commit all session artifacts back to the `feature/agent-remote-execution` branch.
+After analysis is complete, all session artifacts are stored locally only. Do **not** commit or push results to the repository.
 
-```bash
-# Stage results, session record, and any updated skill/config files
-git add ./results/${SESSION_ID}/
-git add ./sessions/
-
-# Commit with structured message
-git commit -m "results(${SESSION_ID}): ${USER_INTENT} on ${TARGET_HOST}
-
-Platform : ${PLATFORM_ID} — $(ssh $LAB_HOST 'grep -m1 model\ name /proc/cpuinfo | cut -d: -f2 | xargs')
-Kernel   : ${KERNEL}
-Benchmarks: ${BENCHMARK_SET}
-Verdict  : <PASS|FAIL>
-Artifact dir (remote): ${REMOTE_ARTIFACT_DIR}/${SESSION_ID}
-
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
-
-# Push to the feature branch only — never push to main
-git push origin feature/agent-remote-execution
-```
-
-**Rules for the commit:**
-- Always push to `feature/agent-remote-execution` — never directly to `main`.
-- Include the full analysis report as `./results/${SESSION_ID}/report.md` before committing.
-- If `git push` fails (non-fast-forward), run `git pull --rebase origin feature/agent-remote-execution` then retry.
-- Do not commit raw EMON binary data — only parsed summaries and the analysis report.
+- Results are written to `./results/${SESSION_ID}/` on the local machine.
+- Session metadata is saved to `./sessions/${SESSION_ID}.json`.
+- The analysis report is written to `./results/${SESSION_ID}/report.md`.
+- No `git add`, `git commit`, or `git push` of results data is performed.
 
 ---
 
