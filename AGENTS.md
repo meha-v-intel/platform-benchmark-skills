@@ -265,7 +265,7 @@ The analysis skill:
 6. Assigns confidence levels (High / Medium / Low) based on Intel platform validation data
 7. Maps all findings to the **user's original stated intent**
 
-**Report structure:**
+**Report structure (`report.md`):**
 ```
 BENCHMARK INSIGHTS — <User Intent>
 ====================================
@@ -300,6 +300,119 @@ TUNING RECOMMENDATIONS & PREDICTIONS
 
 Overall Verdict : PASS/FAIL — <workload-specific assessment>
 ```
+
+---
+
+## Phase 9a: Deep Dive Analysis & Tuning Recommendations
+
+After generating `report.md`, always produce two additional artefacts saved locally under `./results/${SESSION_ID}/`:
+
+### 9a-1 — Deep Dive Report (`deep_dive_report.md`)
+
+For every metric that is measured, produce a section with:
+- **Raw data table** — all recorded values across intervals/samples
+- **Reference comparison** — measured vs published Intel platform baseline
+- **Root cause chain** — step-by-step signal chain explaining *why* the gap exists
+  (e.g. working set > L3 → TLB pressure → DRAM amplification → observed latency)
+- **Cross-domain correlation** — link EMON signals to benchmark results
+  (e.g. 40% L3 miss rate confirms memory-latency bottleneck observed in multichase)
+- **Topology analysis** — for C2C, show full matrix with per-tier classification
+  (HT sibling / intra-node / cross-NUMA / cross-socket) with HFT/workload verdict per tier
+- **Advisory notes** — any sub-threshold finding that could become a problem at scale
+
+Structure per benchmark domain:
+
+```
+## 1. CPU Frequency & Power
+   Raw data table (all turbostat intervals)
+   Key observations (frequency, IPC, power, C-state residency)
+   Advisories (uncore frequency, EPB setting, HWP state)
+
+## 2. Core-to-Core Latency
+   Full matrix (all measured core pairs, ns ± jitter)
+   Tier classification table
+   Root cause of cross-socket penalty
+   Asymmetry analysis (mesh-stop distance effects)
+
+## 3. Memory Subsystem
+   Latency curve table (all working set sizes)
+   Why latency climbs with working set (TLB / row-buffer / NUMA spill)
+   EMON corroboration (LLC miss rate → DRAM pressure)
+
+## 4. Wakeup Latency
+   Full percentile table (P50 / avg / P99 / P99.9 / P99.99 / max)
+   Distribution interpretation (bimodal: C1 fast path vs C6P tail)
+   Pre-wake mechanism effect (Raw vs corrected delta)
+   HFT stall risk (worst-case latency ÷ polling interval)
+
+## 5. EMON Telemetry
+   Aggregated stats table (avg / min / max across all intervals)
+   IPC interpretation (system-wide vs single-thread context)
+   Cache pressure signals (L3 miss rate, LLC miss rate)
+   OS noise signals (context switches/sec, CPU migrations/sec)
+
+## 6. Cross-Domain Correlation
+   Signal chain diagram linking EMON → benchmark results
+   Predicted latency breakdown (baseline + each amplifier)
+```
+
+### 9a-2 — Tuning Recommendations (`tuning_recommendations.md`)
+
+For every metric that **FAIL**s or is marked **ADVISORY** in the scorecard, produce a dedicated section:
+
+```
+## REC-N — <Metric Name> [❌ CRITICAL | ⚠️ ADVISORY | ❌ HIGH]
+
+### Assessment
+  Measured: <value> | Reference: <value> | Gap: <+X%>
+  2–3 sentence explanation of what this means for the target workload.
+
+### Root Cause
+  Ordered list of contributing factors (most impactful first).
+
+### Fix
+  Exact bash commands to apply the fix on the target system.
+  Include verification command to confirm fix took effect.
+
+### Expected Improvement
+  Table: Action → Expected metric value → % reduction → Confidence level
+
+### End-to-End Workload Impact
+  Amdahl's Law estimate: what % of the workload is affected,
+  predicted overall latency/throughput improvement.
+```
+
+End the file with:
+```
+## Combined Implementation Sequence
+  PHASE 1 — Immediate (no reboot): list of quick fixes + expected gains
+  PHASE 2 — Next maintenance window (reboot required): kernel/GRUB changes
+  PHASE 3 — Platform owner coordination: BIOS/firmware changes
+
+## Predicted Outcomes After Full Tuning
+  Table: Metric | Current | After Phase 1 | After Phase 2+3 | Target | Met?
+  Summary: projected end-to-end latency/throughput range after all fixes.
+```
+
+### Scorecard format (used in both files)
+
+Every report must include this exact scorecard table for the workload:
+
+```
+BENCHMARK        MEASURED      REFERENCE     GAP        STATUS
+───────────────────────────────────────────────────────────────
+<metric>         <value>       <ref>         <±X%>      ✅ PASS / ❌ CRITICAL / ⚠️ ADVISORY
+...
+───────────────────────────────────────────────────────────────
+VERDICT: PASS / CONDITIONAL / FAIL — <one-line summary>
+         <list of blocking items if CONDITIONAL or FAIL>
+```
+
+Status codes:
+- `✅ PASS` — within threshold
+- `⚠️ ADVISORY` — within threshold but warrants monitoring or has HFT-specific concern
+- `❌ HIGH` — exceeds threshold, impacts performance
+- `❌ CRITICAL` — exceeds threshold, directly blocks workload readiness
 
 ---
 
