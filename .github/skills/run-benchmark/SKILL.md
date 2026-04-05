@@ -11,9 +11,32 @@ allowed-tools: Bash
 **Platform:** Intel Diamond Rapids (DMR), 1S×32C×1T, 30GB RAM, CentOS Stream 10
 **Output dir:** `/tmp/benchmarks/<timestamp>/`
 
+---
+
+## Full Agentic Execution Flow
+
+Run this complete sequence for every benchmark request.
+Each step invokes the corresponding skill — do not skip steps.
+
+```
+1. benchmark-auth          ← establish SSH (key / identity file / password)
+2. benchmark-system-config ← collect CPU, memory, BIOS, OS, power state
+3. benchmark-session check ← find existing run or build new set; confirm with user
+4. Platform Discovery      ← NPROC, WORK_DIR, MLC_PATH, OUTPUT_DIR, SESSION_ID
+5. benchmark-preflight     ← NUMA + C-state gate (FAIL = stop)
+6. benchmark-emon start    ← begin PMU telemetry collection
+7. benchmark-<name>        ← run the requested benchmark(s)
+8. benchmark-emon stop     ← stop telemetry, retrieve data
+9. scp results locally     ← bench/ + emon/ → ./results/<session-id>/
+10. benchmark-session save ← persist session record
+11. benchmark-analyze      ← bottleneck detection + tuning predictions
+```
+
+---
+
 ## Quick Reference
 
-| `/run-benchmark $name` | What it runs |
+| `$ARGUMENTS` | What it runs |
 |---|---|
 | `preflight` | NUMA check + C-state check (always run first) |
 | `max-freq` | Max single-core frequency (turbostat, ~12s) |
@@ -28,56 +51,159 @@ allowed-tools: Bash
 | `memory` | memory-latency + memory-bandwidth |
 | `all` | All applicable single-node benchmarks |
 
+---
+
 ## Variables
 
-| Variable | Description | Example |
+| Variable | Source | Example |
 |---|---|---|
-| `$LAB_HOST` | SSH target alias from `~/.ssh/config` | `lab-target` |
-| `$OUTPUT_DIR` | Remote results directory | `/tmp/benchmarks/2026-04-04/` |
-| `$NPROC` | Core count discovered at runtime | `32` |
+| `$LAB_HOST` | benchmark-auth | `lab-target` |
+| `$SSH_CMD` | benchmark-auth | `ssh` or `sshpass -e ssh` |
+| `$SCP_CMD` | benchmark-auth | `scp` or `sshpass -e scp` |
+| `$PLATFORM_ID` | benchmark-system-config | `a3f9c1d2e4f5` |
+| `$SYSCONFIG_JSON` | benchmark-system-config | `./results/<id>/sysconfig.json` |
+| `$SESSION_ID` | Phase 4 discovery | `20260405T120000-a3f9c1` |
+| `$OUTPUT_DIR` | Phase 4 discovery | `/tmp/benchmarks/2026-04-05T12-00-00` |
+| `$NPROC` | Phase 4 discovery | `32` |
+| `$WORK_DIR` | Phase 4 discovery | `/root` |
+| `$MLC_PATH` | Phase 4 discovery | `/root/mlc` |
+| `$EMON_OUTPUT_DIR` | benchmark-emon | `/tmp/benchmarks/.../perf` |
+| `$WORKLOAD_TYPE` | Derived from intent | `cpu` / `memory` / `ai` / `mixed` |
 
-Set by the agent before invoking any sub-skill. See `AGENT.md` for how these are populated.
+---
 
-## How to Run
+## Step 1 — Authentication
 
-**Step 1 — Always run preflight first**
 ```bash
-/run-benchmark preflight
+/benchmark-auth --host <TARGET_HOST> --user <USER> --alias lab-target
+# Sets: LAB_HOST, SSH_CMD, SCP_CMD
 ```
-This confirms NUMA=1 and C-states are healthy before spending time on micro-benchmarks.
 
-**Step 2 — Run requested benchmark**
+---
+
+## Step 2 — System Configuration
+
 ```bash
-/run-benchmark $ARGUMENTS
+/benchmark-system-config
+# Sets: PLATFORM_ID, SYSCONFIG_JSON
+# Saves: ./results/${SESSION_ID}/sysconfig.json
 ```
 
-**Step 3 — Report results**
-After execution, parse and report:
-- Status (passed/failed/warning)
-- KPI values with units
-- Delta vs GNR baseline (with sign: +X% means DMR is better for higher-is-better metrics)
-- Any platform-specific notes
+---
 
-## Dispatch Logic
+## Step 3 — Session Check & User Confirmation
 
-Map `$ARGUMENTS` to the appropriate sub-skill:
+```bash
+/benchmark-session check --intent "${USER_INTENT}" --platform "${PLATFORM_ID}"
+```
 
-| Argument | Sub-skill to invoke |
+Present results to user. Wait for explicit confirmation: **Reuse / Modify / New**.
+Do not proceed until user responds.
+
+---
+
+## Step 4 — Platform Discovery
+
+```bash
+NPROC=$(${SSH_CMD} $LAB_HOST "nproc --all")
+WORK_DIR=$(${SSH_CMD} $LAB_HOST "echo \$HOME")
+MLC_PATH=$(${SSH_CMD} $LAB_HOST "ls /root/mlc 2>/dev/null || echo /root/mlc")
+KERNEL=$(${SSH_CMD} $LAB_HOST "uname -r")
+OUTPUT_DIR="/tmp/benchmarks/$(date +%Y-%m-%dT%H-%M-%S)"
+SESSION_ID="$(date +%Y%m%dT%H%M%S)-${PLATFORM_ID}"
+${SSH_CMD} $LAB_HOST "mkdir -p $OUTPUT_DIR"
+mkdir -p ./results/${SESSION_ID}/{bench,emon}
+```
+
+---
+
+## Step 5 — Preflight Gate
+
+```bash
+/benchmark-preflight
+```
+
+- **PASS** (NUMA=1, driver=intel_idle) → continue.
+- **FAIL** → stop, report findings, do not run benchmarks.
+
+---
+
+## Step 6 — Start EMON Monitoring
+
+```bash
+/benchmark-emon start --workload "${WORKLOAD_TYPE}"
+# Sets: EMON_PID, EMON_OUTPUT_DIR, EMON_TOOL
+```
+
+Derive `WORKLOAD_TYPE` from intent:
+
+| Benchmark set | WORKLOAD_TYPE |
 |---|---|
-| `preflight` | See [preflight procedure](./references/preflight.md) |
-| `max-freq` | See [CPU benchmark procedure](./references/cpu-benchmarks.md) |
-| `turbo-curve` | See [CPU benchmark procedure](./references/cpu-benchmarks.md) |
-| `core-to-core` | See [CPU benchmark procedure](./references/cpu-benchmarks.md) |
-| `cpu` | Run preflight + max-freq + turbo-curve + core-to-core in sequence |
-| `memory-latency` | See [memory benchmark procedure](./references/memory-benchmarks.md) |
-| `memory-bandwidth` | See [memory benchmark procedure](./references/memory-benchmarks.md) |
-| `memory-latency-bw` | See [memory benchmark procedure](./references/memory-benchmarks.md) |
-| `memory` | Run memory-latency + memory-bandwidth |
-| `amx` | See [AMX benchmark procedure](./references/amx-benchmark.md) |
-| `wakeup` | See [wakeup latency procedure](./references/wakeup-benchmark.md) |
-| `all` | Run all of the above in phase order |
+| cpu only | `cpu` |
+| memory only | `memory` |
+| amx / AI | `ai` |
+| cpu + memory / mixed | `mixed` |
 
-If `$ARGUMENTS` is empty, ask the user which benchmark they want to run and show the table above.
+---
+
+## Step 7 — Run Benchmarks
+
+Dispatch to the appropriate sub-skill based on `$ARGUMENTS`:
+
+| Argument | Sub-skill |
+|---|---|
+| `preflight` | [preflight procedure](./references/preflight.md) |
+| `max-freq` | [CPU benchmarks](./references/cpu-benchmarks.md) |
+| `turbo-curve` | [CPU benchmarks](./references/cpu-benchmarks.md) |
+| `core-to-core` | [CPU benchmarks](./references/cpu-benchmarks.md) |
+| `cpu` | max-freq + turbo-curve + core-to-core (sequential) |
+| `memory-latency` | [Memory benchmarks](./references/memory-benchmarks.md) |
+| `memory-bandwidth` | [Memory benchmarks](./references/memory-benchmarks.md) |
+| `memory-latency-bw` | [Memory benchmarks](./references/memory-benchmarks.md) |
+| `memory` | memory-latency + memory-bandwidth |
+| `amx` | [AMX benchmark](./references/amx-benchmark.md) |
+| `wakeup` | [Wakeup latency](./references/wakeup-benchmark.md) |
+| `all` | preflight → cpu → memory → amx → wakeup (sequential) |
+
+If `$ARGUMENTS` is empty, show this table and ask the user which benchmark to run.
+
+Tee all output to `./results/${SESSION_ID}/bench/<name>.log`:
+```bash
+${SSH_CMD} $LAB_HOST "sudo <command>" | tee ./results/${SESSION_ID}/bench/<name>.log
+```
+
+---
+
+## Step 8 — Stop EMON & Collect Data
+
+```bash
+/benchmark-emon stop
+
+${SCP_CMD} -r ${LAB_HOST}:${OUTPUT_DIR}/      ./results/${SESSION_ID}/bench/
+${SCP_CMD} -r ${LAB_HOST}:${EMON_OUTPUT_DIR}/ ./results/${SESSION_ID}/emon/
+```
+
+---
+
+## Step 9 — Save Session
+
+```bash
+/benchmark-session save \
+  --session-id  "${SESSION_ID}" \
+  --intent      "${USER_INTENT}" \
+  --platform    "${PLATFORM_ID}" \
+  --benchmarks  "${BENCHMARK_SET}"
+```
+
+---
+
+## Step 10 — Analyze & Report
+
+```bash
+/benchmark-analyze --session-id "${SESSION_ID}"
+```
+
+---
 
 ## Pass/Fail Criteria (DMR)
 
@@ -90,15 +216,17 @@ If `$ARGUMENTS` is empty, ask the user which benchmark they want to run and show
 | Core-to-core | ≤ 180 cycles intra-domain | 63–71 cycles |
 | Memory latency | ≤ 139 ns (2 GiB working set) | 116 ns |
 | Memory BW | ≥ 1454 GBps (MLC all-reads) | 158 GB/s (per-socket) |
-| AMX BF16 | > GNR at iso-core | 12.6 TFLOPS (8-core) |
-| AMX INT8 | > GNR at iso-core | 22.9 TOPS (8-core) |
+| AMX BF16 | > 12,600 GFLOPS iso-core | 12.6 TFLOPS (8-core) |
+| AMX INT8 | > 22,900 TOPS iso-core | 22.9 TOPS (8-core) |
 | Wakeup latency | median ≤ 90 µs, max ≤ 260 µs | 1.59 µs median (wult) |
+
+---
 
 ## Important Platform Notes
 
-- **Do NOT measure idle cores with turbostat** — TSC stops in C6 substates (C6A/C6S/C6SP), causing exit code 253. Always measure **loaded cores**.
-- **DMR C-states**: C6A/C6S/C6SP (50/70/110 µs exit latency) — different from GNR's C6/C6P. This is correct DMR behavior.
-- **Single NUMA node**: DMR on this system has 1 NUMA node. Pass = 1. GNR had 6 (SNC3).
+- **Do NOT measure idle cores with turbostat** — TSC stops in DMR C6 substates, causing exit 253.
+- **DMR C-states**: C6A/C6S/C6SP (50/70/110 µs) — different from GNR. This is correct behavior.
+- **Single NUMA node**: DMR = 1 node. PASS. GNR had 6 (SNC3).
 - **All installs use `dnf`**, not `apt-get` — CentOS Stream 10.
 
 ## Additional References
