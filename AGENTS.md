@@ -9,8 +9,36 @@ Skills live in `.github/skills/`. Each `SKILL.md` defines exact commands, pass/f
 
 **End-to-end agentic flow:**
 ```
-Auth → System Config → Intent → Session Check → Confirm → Preflight → EMON Start → Benchmarks → EMON Stop → Collect → Analyze & Predict
+Inputs → Auth → System Config → Intent → Session Check → Confirm → Preflight → EMON Start → Benchmarks → EMON Stop → Collect → Analyze & Predict → Commit
 ```
+
+---
+
+## Phase 0: Required Inputs
+
+Collect all required inputs from the user **before** proceeding to auth.
+Ask for any missing values — do not assume defaults for host, user, or artifact directory.
+
+| Input | Variable | Required | Default | Example |
+|---|---|---|---|---|
+| Remote host IP or hostname | `TARGET_HOST` | ✅ Yes | — | `10.1.225.221` |
+| Remote username | `TARGET_USER` | ✅ Yes | — | `root` |
+| SSH alias (for `~/.ssh/config`) | `TARGET_ALIAS` | No | `lab-target` | `lab-target` |
+| SSH identity file path | `IDENTITY_FILE` | No | — | `~/.ssh/id_ed25519` |
+| Jump / bastion host | `JUMP_HOST` | No | — | `bastion.corp.com` |
+| **Remote artifact directory** | `REMOTE_ARTIFACT_DIR` | ✅ Yes | — | `/data/benchmarks` |
+| Benchmark intent | `USER_INTENT` | ✅ Yes | — | `HFT workload validation` |
+
+**Prompt template** (ask once, upfront):
+> *"Before we start, I need a few details:*
+> *1. Remote server IP/hostname?*
+> *2. Username on that server?*
+> *3. Where on the remote server should benchmark artifacts be stored?*
+>    *(e.g. `/data/benchmarks`, `/scratch/results` — must have write access)*
+> *4. What would you like to benchmark? (workload type / goal)*"
+
+`REMOTE_ARTIFACT_DIR` is the **root** directory on the remote machine for all benchmark output.
+All session data is written to `${REMOTE_ARTIFACT_DIR}/${SESSION_ID}/` on the remote host.
 
 ---
 
@@ -118,13 +146,23 @@ NPROC=$(ssh $LAB_HOST "nproc --all")
 WORK_DIR=$(ssh $LAB_HOST "echo \$HOME")
 MLC_PATH=$(ssh $LAB_HOST "ls /root/mlc 2>/dev/null || echo /root/mlc")
 KERNEL=$(ssh $LAB_HOST "uname -r")
-OUTPUT_DIR="/tmp/benchmarks/$(date +%Y-%m-%dT%H-%M-%S)"
 SESSION_ID="$(date +%Y%m%dT%H%M%S)-${PLATFORM_ID}"
-ssh $LAB_HOST "mkdir -p $OUTPUT_DIR"
-mkdir -p ./results/${SESSION_ID}
+
+# REMOTE_ARTIFACT_DIR was collected in Phase 0 from the user.
+# All benchmark output on the remote machine lives under this path.
+OUTPUT_DIR="${REMOTE_ARTIFACT_DIR}/${SESSION_ID}"
+ssh $LAB_HOST "mkdir -p ${OUTPUT_DIR}/bench ${OUTPUT_DIR}/emon ${OUTPUT_DIR}/sysconfig"
+
+# Local mirror for analysis and git commit
+mkdir -p ./results/${SESSION_ID}/{bench,emon,sysconfig}
 ```
 
 Export all as environment variables — every skill invocation depends on them.
+
+> **Note:** If `REMOTE_ARTIFACT_DIR` was not provided in Phase 0, stop and ask:
+> *"Where on the remote server should I store benchmark artifacts?
+> (e.g. `/data/benchmarks` — needs write access and sufficient free space)"*
+> Do not fall back to `/tmp` silently — tmp may be too small for long runs (40+ min benchmarks produce GB of EMON data).
 
 ---
 
@@ -265,6 +303,38 @@ Overall Verdict : PASS/FAIL — <workload-specific assessment>
 
 ---
 
+## Phase 10: Commit Results to Repository
+
+After analysis is complete, commit all session artifacts back to the `feature/agent-remote-execution` branch.
+
+```bash
+# Stage results, session record, and any updated skill/config files
+git add ./results/${SESSION_ID}/
+git add ./sessions/
+
+# Commit with structured message
+git commit -m "results(${SESSION_ID}): ${USER_INTENT} on ${TARGET_HOST}
+
+Platform : ${PLATFORM_ID} — $(ssh $LAB_HOST 'grep -m1 model\ name /proc/cpuinfo | cut -d: -f2 | xargs')
+Kernel   : ${KERNEL}
+Benchmarks: ${BENCHMARK_SET}
+Verdict  : <PASS|FAIL>
+Artifact dir (remote): ${REMOTE_ARTIFACT_DIR}/${SESSION_ID}
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+
+# Push to the feature branch only — never push to main
+git push origin feature/agent-remote-execution
+```
+
+**Rules for the commit:**
+- Always push to `feature/agent-remote-execution` — never directly to `main`.
+- Include the full analysis report as `./results/${SESSION_ID}/report.md` before committing.
+- If `git push` fails (non-fast-forward), run `git pull --rebase origin feature/agent-remote-execution` then retry.
+- Do not commit raw EMON binary data — only parsed summaries and the analysis report.
+
+---
+
 ## Safety Rules
 
 - **Never reboot** the lab machine.
@@ -272,10 +342,11 @@ Overall Verdict : PASS/FAIL — <workload-specific assessment>
 - **Never kill a tmux session** without first checking if a benchmark is mid-run.
 - **Always run preflight** — if preflight FAILS, do not proceed.
 - **Always confirm benchmark set with user** before executing (reuse or new).
-- **Use `dnf`**, not `apt-get` — remote OS is CentOS Stream 10.
+- **Use `dnf`** for CentOS/RHEL, **`apt-get`** for Ubuntu/Debian — detect OS from `sysconfig.json`.
 - **Do not hardcode core counts** — always use `$NPROC` discovered at runtime.
-- **Do not hardcode paths** — always use `$WORK_DIR` discovered at runtime.
+- **Do not hardcode paths** — always use `$WORK_DIR` and `$REMOTE_ARTIFACT_DIR` discovered at runtime.
 - **Never store passwords on disk** — use `SSHPASS` env var only, cleared after session.
+- **Always ask for `REMOTE_ARTIFACT_DIR`** in Phase 0 — never silently default to `/tmp`.
 
 ---
 
