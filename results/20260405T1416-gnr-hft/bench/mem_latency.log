@@ -1,6 +1,0 @@
-bash: line 1: 893743 Segmentation fault      (core dumped) numactl --cpunodebind=0 --membind=0 /tmp/mem_lat2 $ws
-bash: line 1: 893745 Segmentation fault      (core dumped) numactl --cpunodebind=0 --membind=0 /tmp/mem_lat2 $ws
-bash: line 1: 893747 Segmentation fault      (core dumped) numactl --cpunodebind=0 --membind=0 /tmp/mem_lat2 $ws
-bash: line 1: 893749 Segmentation fault      (core dumped) numactl --cpunodebind=0 --membind=0 /tmp/mem_lat2 $ws
-bash: line 1: 893751 Segmentation fault      (core dumped) numactl --cpunodebind=0 --membind=0 /tmp/mem_lat2 $ws
-bash: line 1: 893753 Segmentation fault      (core dumped) numactl --cpunodebind=0 --membind=0 /tmp/mem_lat2 $ws
