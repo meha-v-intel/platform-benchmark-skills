@@ -1,0 +1,10 @@
+toolname: wult
+toolver: 1.12.60
+cpu: 1
+format_version: '1.3'
+reportid: wult-tdt-20260405
+date: 05 Apr 2026
+devid: tdt
+devdescr: TSC deadline timer
+resolution: 1
+duration: 6m 59s

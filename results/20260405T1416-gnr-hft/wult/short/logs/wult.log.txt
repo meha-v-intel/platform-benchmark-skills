@@ -1,0 +1,14 @@
+Command line: /usr/local/bin/wult start tdt --cpu 1 --time-limit 300 --stats  --outdir /tmp/benchmarks/20260405T1416-gnr-hft/wult/short
+Created statistics result directory '/tmp/benchmarks/20260405T1416-gnr-hft/wult/short/stats'
+No statistics will be collected
+wult: notice: C-state prewake is enabled, and this usually hides the real latency when using 'tdt' as delayed event device
+Using 'tdt' (TSC deadline timer)
+Setting min. launch distance to 1 ns
+Stopped the 'systemd-timesyncd' NTP service
+Start measuring CPU 1, collecting 1000000 datapoints, time limit is 5h
+Calculating TSC rate for 10s
+TSC rate is 1899.960392 MHz
+wult: notice: interrupted, stopping the measurements
+Starting previously stopped 'systemd-timesyncd' service
+
+Interrupted, exiting
