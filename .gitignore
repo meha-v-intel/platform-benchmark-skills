@@ -1,3 +1,6 @@
 # Benchmark results and session data are stored locally only — never committed
 results/
 sessions/
+
+# Preflight and ad-hoc benchmark log files
+*.log
