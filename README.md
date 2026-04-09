@@ -1,125 +1,164 @@
-# Intel Platform Benchmark Skills for GitHub Copilot
+# storage-iperf3 — GitHub Copilot CLI Skill
 
-GitHub Copilot skills for running Intel Xeon platform micro-benchmarks. Clone this repo and ask Copilot to run any benchmark — it knows the exact commands, tools, pass/fail criteria, and GNR baseline values.
+**Branch:** `storage-skills`  
+**Scope:** Single skill — iperf3 network bandwidth and latency validation for Storage Segment Test 108  
+**Audience:** Engineer validating a 2-system, dual-port 400GbE back-to-back topology
 
-All skills are validated against Intel BKM (Best Known Method) documents.
-
----
-
-## How to use
-
-1. Clone this repo into your project (or add it as a submodule)
-2. Open the project in VS Code with GitHub Copilot Chat enabled
-3. Ask Copilot in natural language:
-
-```
-run the preflight checks
-run the CPU benchmarks
-run the wakeup latency benchmark
-what is the memory latency on this system?
-```
-
-Copilot automatically loads the relevant skill and runs the correct commands for your system.
+> This branch contains only the `storage-iperf3` Copilot CLI skill.
+> For the full platform benchmark skills set (CPU, memory, AMX, wakeup), see the `main` branch.
 
 ---
 
-## Skills
+## Problem Statement
 
-| Skill | What it runs | Typical runtime |
+You have two servers connected back-to-back with a dual-port 800Gbps NIC (2 × 400Gbps
+ports per system). You need to:
+
+- Confirm each 400GbE link can sustain ≥ 380 Gbps TCP throughput
+- Confirm aggregate NIC throughput reaches ≥ 750 Gbps across both links simultaneously
+- Identify which configuration conditions (MTU, streams, TCP window, IRQ coalescing) are
+  required to actually reach 400 Gbps
+- Collect CPU/NIC PMU telemetry during tests to attribute any shortfall to a root cause
+
+---
+
+## Topology
+
+```
+System A (SERVER)                       System B (CLIENT)
+┌─────────────────────────┐             ┌─────────────────────────┐
+│  NIC-A (800G, 2-port)   │             │  NIC-B (800G, 2-port)   │
+│  Port A0: $IP_A0 (400G) │◄───Link1───►│  Port B0: $IP_B0 (400G) │
+│  Port A1: $IP_A1 (400G) │◄───Link2───►│  Port B1: $IP_B1 (400G) │
+└─────────────────────────┘             └─────────────────────────┘
+  Aggregate target: 800 Gbps Tx + 800 Gbps Rx (1.6 Tbps full-duplex)
+```
+
+> **Two physical machines required.** This test cannot run on a single system.
+
+---
+
+## How to Use
+
+1. Clone this branch into your project workspace
+2. Open in VS Code with GitHub Copilot Chat enabled
+3. Set the required variables (see below), then ask Copilot:
+
+```
+@workspace /storage-iperf3 all
+```
+
+Copilot runs all test groups in order, collects EMON telemetry on both machines,
+and prints a pass/fail report at the end.
+
+---
+
+## Skill
+
+| Skill | What it runs | Runtime |
 |---|---|---|
-| `benchmark-preflight` | NUMA topology check + C-state enumeration | ~10s |
-| `benchmark-cpu` | Max frequency, turbo curve, core-to-core latency | ~5 min |
-| `benchmark-memory` | DRAM latency (multichase), bandwidth (PKB), latency-BW curve (MLC) | ~45 min |
-| `benchmark-amx` | AMX BF16 + INT8 throughput via oneDNN benchdnn | ~5 min |
-| `benchmark-wakeup` | C6 wakeup latency via Intel wult (TDT backend) | ~5–35 min |
-| `run-benchmark` | Orchestrator — dispatches to any of the above | varies |
+| `storage-iperf3` | iperf3 TCP/UDP sweep, NIC aggregate, config sweep, EMON collection | ~36 min |
+
+### Test Groups
+
+| Group | Subtests | Purpose |
+|---|---|---|
+| A | 108.001–006 | Single-stream TCP Tx / Rx / BiDir per link (baseline) |
+| B | 108.007–014 | Multi-stream -P8 / -P16 TCP per link (line-rate saturation) |
+| C | 108.015–018 | Both links simultaneously — NIC aggregate throughput |
+| D | 108.019–022 | UDP jitter and line-rate packet loss |
+| E | 108.023–026 | 60-second sustained stability (thermal/clock sag) |
+| F | 108.F.1–F.16 | Config sweep: MTU / streams / TCP window / coalescing |
+| EMON | — | `perf stat` running on both systems throughout all groups |
+
+### Invocation
+
+```bash
+@workspace /storage-iperf3 all            # full run
+@workspace /storage-iperf3 link1          # Groups A+B, Link1 only
+@workspace /storage-iperf3 link2          # Groups A+B, Link2 only
+@workspace /storage-iperf3 both           # Group C — NIC aggregate
+@workspace /storage-iperf3 latency        # Group D — UDP
+@workspace /storage-iperf3 single link1 sweep   # Group F — config sweep
+```
 
 ---
 
-## Pass/fail criteria
+## Variables to Set
 
-| Benchmark | Metric | Pass threshold | GNR reference |
-|---|---|---|---|
-| NUMA check | Node count | = 1 (single domain) | 6 nodes (SNC3) |
-| C-state check | cpuidle driver | intel_idle | intel_idle |
-| Max frequency | Bzy_MHz | ≥ 3600 MHz | 3300 MHz |
-| Core-to-core latency | Mean round-trip | ≤ 180 cycles | 63–71 cycles |
-| Memory latency | 2 GiB working set | ≤ 139 ns | 116 ns |
-| AMX BF16 (iso-core 8C) | Throughput | > 12.6 TFLOPS | 12.6 TFLOPS |
-| AMX INT8 (iso-core 8C) | Throughput | > 22.9 TOPS | 22.9 TOPS |
-| Wakeup latency | Median | ≤ 90 µs | 1.59 µs |
-| Wakeup latency | Max | ≤ 260 µs | 10.59 µs |
+```bash
+export SERVER_HOST="storage-server-a"   # SSH alias for System A
+export CLIENT_HOST="storage-server-b"   # SSH alias for System B
+export IP_A0="192.168.10.1"             # System A Port 0 — Link1 server end
+export IP_A1="192.168.11.1"             # System A Port 1 — Link2 server end
+export IP_B0="192.168.10.2"             # System B Port 0 — Link1 client end
+export IP_B1="192.168.11.2"             # System B Port 1 — Link2 client end
+export IFACE_A0="ens1f0"                # System A NIC interface, Port 0
+export IFACE_A1="ens1f1"                # System A NIC interface, Port 1
+export OUTPUT_DIR="/data/benchmarks/test108"
+export DURATION=30
+export STREAMS=8
+```
 
 ---
 
-## Prerequisites by benchmark
+## Requirements
 
-| Benchmark | Required tools |
+| Item | Requirement |
 |---|---|
-| Preflight | `numactl` |
-| CPU (max-freq, turbo) | `turbostat`, `cpupower` |
-| CPU (core-to-core) | `cargo` + `git` (builds [nviennot/core-to-core-latency](https://github.com/nviennot/core-to-core-latency)) |
-| Memory latency | `multichase` (via PKB or standalone build) |
-| Memory bandwidth | PerfKitBenchmarker (PKB) |
-| Memory lat-BW curve | Intel MLC v3.12 (download from Intel) |
-| AMX | Intel oneDNN `benchdnn` (built from source or pre-built) |
-| Wakeup | Intel `wult` v1.12+ (installed automatically by the skill) |
+| Systems | 2 × servers (any Intel CPU with PCIe Gen5 ×16 slot) |
+| NIC | 1 × 800Gbps dual-port NIC per system (e.g. Intel E810-C2Q) |
+| Cabling | 2 × direct-attach cables (400GbE DAC/AOC), back-to-back |
+| OS | CentOS Stream / RHEL 9, or Ubuntu 22.04+ |
+| iperf3 | ≥ 3.7 (for `--bidir`); ≥ 3.10 recommended |
+| perf | Pre-installed on most distros; `dnf install perf` if missing |
 
 ---
 
-## Platform
+## Pass/Fail Thresholds
 
-These skills were developed and validated on:
+| Test | Threshold | Gate |
+|---|---|---|
+| Single stream (-P1) per link | ≥ 300 Gbps | — |
+| Multi-stream -P8 per link | ≥ 370 Gbps | — |
+| **Multi-stream -P16 per link** | **≥ 380 Gbps** | **Primary** |
+| Both links aggregate (Tx) | ≥ 750 Gbps | — |
+| Both links BiDir | ≥ 740 Gbps each dir | — |
+| UDP packet loss at line rate | ≤ 0.5% | — |
+| Sustained 60s vs 30s delta | < 5% sag | — |
 
-- **Intel Diamond Rapids (DMR)** — 1S × 32C × 1T, single NUMA domain
-- CentOS Stream 10, kernel 6.18.0 (BKC)
-- GNR baselines from Intel Xeon 6985P-C (2S × 60C, SNC3, Ubuntu 24.04)
-
-Skills adapt automatically to the system they run on. Core counts, NUMA topology, and tool paths are discovered at runtime, not hardcoded.
+> 393 Gbps is the practical SW TCP ceiling for a 400G link — the remaining ~1.75% is
+> TCP/IP header overhead. This is expected and is not a failure.
 
 ---
 
-## Repository structure
+## Quick Diagnosis
+
+| Result | Most likely cause | Fix |
+|---|---|---|
+| < 250 Gbps | MTU 1500 (jumbo frames off) | `ip link set $IFACE mtu 9000` |
+| 250–350 Gbps | TCP window too small | `sysctl -w net.core.rmem_max=536870912` |
+| 350–375 Gbps | IRQ coalescing or affinity | `ethtool -C $IFACE rx-usecs 50` + stop irqbalance |
+| BiDir << Tx-only | PCIe Gen4 slot | Move NIC to PCIe Gen5 ×16 slot |
+| Throughput drops after 30s | NIC thermal throttle | `ethtool -m $IFACE \| grep Temp` |
+
+---
+
+## Repository Structure (this branch)
 
 ```
 .github/skills/
-├── run-benchmark/              # Orchestrator skill
-│   ├── SKILL.md
-│   └── references/             # Detailed per-benchmark reference docs
-│       ├── preflight.md
-│       ├── cpu-benchmarks.md
-│       ├── memory-benchmarks.md
-│       ├── amx-benchmark.md
-│       └── wakeup-benchmark.md
-├── benchmark-preflight/
-│   └── SKILL.md
-├── benchmark-cpu/
-│   ├── SKILL.md
-│   └── scripts/
-│       └── turbo_curve_imperia_final.sh   # BKM-provided script
-├── benchmark-memory/
-│   ├── SKILL.md
-│   └── scripts/
-│       └── run_mlc_lat_bw.sh              # BKM-provided MLC sweep script
-├── benchmark-amx/
-│   └── SKILL.md
-└── benchmark-wakeup/
-    └── SKILL.md
+└── storage-iperf3/
+    ├── SKILL.md    ← Copilot CLI skill (757 lines — all commands, thresholds, EMON)
+    └── README.md   ← Detailed skill reference (topology, variables, output files)
+README.md           ← This file
 ```
 
 ---
 
-## BKM validation
+## References
 
-Every command in these skills was validated line-by-line against Intel internal BKM documents:
-
-- `NUMA_CHECK_BKM_NEW_BIOS`
-- `C_STATE_CHECK_BKM_NEW_BIOS`
-- `MAX_FREQ_TEST_BKM`
-- `TURBO_CURVE_BKM`
-- `CORE_TO_CORE_LATENCY_BKM_NEW_BIOS`
-- `MEMORY_LATENCY_PKB_BKM_NEW_BIOS`
-- `MEMORY_BANDWIDTH_PKB_BKM_NEW_BIOS`
-- `MEMORY_LATENCY_BANDWIDTH_CURVE_BKM`
-- `AMX_PERFORMANCE_BKM_NEW_BIOS_GNR`
-- `WAKEUP_LATENCY_BKM_NEW_BIOS`
+- [`SKILL.md`](.github/skills/storage-iperf3/SKILL.md) — full skill with all commands
+- [`skills/storage-iperf3/README.md`](.github/skills/storage-iperf3/README.md) — detailed reference
+- Intel Ethernet 800 Series (E810) Performance Tuning Guide
+- Storage Segment Validation spec: Test 108 (internal)
