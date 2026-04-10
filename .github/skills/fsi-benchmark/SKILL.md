@@ -86,6 +86,41 @@ Platform-to-threshold-column mapping:
 | AMD_TURIN | AMD Turin Intel-Measured |
 | UNKNOWN | GNR (fallback) |
 
+### System Configuration Validation
+
+```bash
+# Kernel version gate
+echo "Kernel: $(uname -r)"
+EXPECTED_KERNEL="6.18"
+uname -r | grep -q "^${EXPECTED_KERNEL}" \
+    && echo "Kernel: PASS — matches BKC ${EXPECTED_KERNEL}" \
+    || echo "Kernel: WARN — expected BKC ${EXPECTED_KERNEL}, got $(uname -r)"
+
+# System inventory (CPU, memory, IPMI)
+dmidecode -t 1 2>/dev/null | grep -E "Manufacturer|Product Name|Version" || true
+dmidecode -t 17 2>/dev/null \
+    | grep -E "Size|Type:|Configured Memory Speed|Part Number" \
+    | grep -v "No Module" | head -16 \
+    || echo "dmidecode -t 17: unavailable"
+
+# Benchmark tool version checks
+echo "--- Tool versions ---"
+wult --version 2>/dev/null || echo "wult: not installed"
+python3 -c "import dnnl; print('oneDNN:', dnnl.__version__)" 2>/dev/null \
+    || find /root -name "libdnnl*" 2>/dev/null | head -1 || echo "oneDNN: location unknown"
+ls -la /usr/lib/x86_64-linux-gnu/libefa.so* 2>/dev/null \
+    || ls /usr/lib64/libefa.so* 2>/dev/null || echo "Solarflare/EFA libs: not found"
+
+# Hugepages check
+HP=$(cat /proc/sys/vm/nr_hugepages)
+[ "$HP" -ge 2048 ] \
+    && echo "Hugepages: OK — $HP (≥2048 required for HFT)" \
+    || echo "Hugepages: WARN — only $HP (run: echo 2048 > /proc/sys/vm/nr_hugepages)"
+
+# Disk space check for output directory
+df -h /tmp 2>/dev/null | awk 'NR==2{print "Tmp space available:", $4}'
+```
+
 ---
 
 ## Step 2 — SMI Check (HFT Critical Gate)
@@ -232,12 +267,17 @@ fi
 FSI BENCHMARK RESULTS — <PLATFORM> — <TIMESTAMP>
 =================================================
 Platform       : DMR / GNR-SP / EMR / AMD Turin (auto-detected)
+Kernel         : PASS/WARN — 6.18.x (BKC) / [actual]
+System Config  : <Manufacturer> <Product> | <N>× DDR5-<speed> DIMMs
+Hugepages      : PASS/WARN — N configured (≥2048 required)
 SMI gate       : PASS — 0 SMIs (HFT prerequisite)
 
 HFT COMPUTE
   hft_rdtscp 1r1w     : PASS — avg XXX ns ± XX ns (5 runs)
   hft_rdtscp 24r1w    : PASS — avg XXX ns ± XX ns
   hft_rdtscp 24r3w    : PASS — avg XXX ns ± XX ns
+  Freq stability      : stable / WARN: droop > 5%
+  NIC drops during    : 0
 
 HFT NETWORK (or: SKIPPED — topology not available)
   UDP eflatency 99%   : PASS — XXX ns ½RTT (threshold: ≤ target from LZ row 7)
@@ -247,6 +287,8 @@ HFT NETWORK (or: SKIPPED — topology not available)
 HPC GRID
   Monte Carlo (ICX avx512) : PASS — XXX options/sec (avg 5 runs)
   Monte Carlo (GCC avx512) : PASS — XXX options/sec
+  IPC (BlackScholesDP)     : X.XX (expected 2–4 for FP workloads)
+  NUMA remote hits         : N (expect 0)
   IAA Compression          : PASS/FAIL — XXX GB/s (threshold vs GNR)
   QAT RSA (PKE)            : PASS — XXX Kops (threshold: ≥100 Kops)
 

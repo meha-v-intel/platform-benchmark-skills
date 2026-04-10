@@ -38,6 +38,15 @@ NUMA_NODES=$(numactl --hardware | awk '/^available:/{print $2}')
 
 echo "Cores: $CORE_COUNT | Threads: $THREAD_COUNT | NUMA nodes: $NUMA_NODES"
 
+# System config verification
+echo "--- System Config ---"
+dmidecode -t 1 2>/dev/null | grep -E "Manufacturer|Product Name|Version" || true
+dmidecode -t 17 2>/dev/null \
+    | grep -E "Size|Type:|Speed:|Configured Memory Speed|Part Number" \
+    | grep -v "No Module" | head -20 \
+    || echo "dmidecode: unavailable"
+echo "Kernel: $(uname -r)"
+
 # Set output directory — bench and emon subdirs are BOTH required
 OUTDIR=/tmp/fsi-benchmarks/$(date +%Y%m%dT%H%M)-hpc
 RESULTS_DIR=$OUTDIR/bench/hpc_workloads
@@ -48,6 +57,10 @@ mkdir -p $RESULTS_DIR $EMON_DIR
 echo always > /sys/kernel/mm/transparent_hugepage/enabled
 cpupower frequency-set -g performance
 echo 0 > /proc/sys/kernel/numa_balancing   # prevent OS page migration mid-run
+
+# NUMA remote-access baseline (expect zeros before workload runs)
+echo "--- NUMA baseline ---"
+numastat -c 2>/dev/null || numastat 2>/dev/null | head -10
 
 # Verify perf stat is available — REQUIRED before starting any workload
 perf stat -a -- sleep 0.1 2>/dev/null \
@@ -131,13 +144,25 @@ cycle_activity.stalls_mem_any \
             -- sleep 999 2>/dev/null &
         PERF_PID=$!
 
+        # Start turbostat to monitor frequency and power across the run
+        turbostat --interval 2 --show Avg_MHz,Bzy_MHz,Busy%,PkgWatt,CorWatt \
+            > $EMON_DIR/${WL}_pr${CORE_COUNT}.turbostat 2>/dev/null &
+        TURBO_PID=$!
+
+        # Start RAPL energy counter
+        perf stat -a -e power/energy-pkg/,power/energy-cores/,power/energy-dram/ \
+            -o $EMON_DIR/${WL}_pr${CORE_COUNT}.rapl \
+            -- sleep 999 2>/dev/null &
+        RAPL_PID=$!
+
         for run in 1 2 3 4 5; do
             PR=$CORE_COUNT numactl --physcpubind=0-$((CORE_COUNT-1)) --localalloc \
                 ./$WL 2>&1 | tail -1 | tee -a $WL_DIR/pr_cores.log
         done
 
-        # Stop perf AFTER the run loop
-        kill $PERF_PID 2>/dev/null; wait $PERF_PID 2>/dev/null || true
+        # Stop all monitors after the run loop
+        kill $PERF_PID $TURBO_PID $RAPL_PID 2>/dev/null
+        wait $PERF_PID $TURBO_PID $RAPL_PID 2>/dev/null || true
 
         # Run B: PR = thread count (SMT / 2T per core) — no separate perf needed;
         # PR=cores run provides the key IPC/BW signal for compute vs memory classification
@@ -168,6 +193,19 @@ for WL in mc_asian_bump_greeks mc_asian_aad_greeks asian-opt binomial \
     fi
 done
 [ $MISSING -eq 0 ] && echo "EMON: all workloads covered" || echo "EMON: $MISSING workloads missing telemetry"
+
+# NUMA remote-access delta — flag any remote hits that occurred during workloads
+echo "--- NUMA post-run (compare to baseline above) ---"
+numastat -c 2>/dev/null || numastat 2>/dev/null | head -10
+
+# IPC spot-check from perf stat (expected 2–4 for FP-heavy workloads)
+echo "--- IPC spot-check (BlackScholesDP, ICX avx512) ---"
+PERF_FILE=$EMON_DIR/BlackScholesDP_pr${CORE_COUNT}.perf
+if [ -s "$PERF_FILE" ]; then
+    awk '/instructions/{inst=$1} /cycles/{cyc=$1} END{
+        if(cyc>0) printf "IPC: %.2f (expected 2–4 for FP workloads)\n", inst/cyc}' "$PERF_FILE" \
+        || grep -E "instructions|cycles" "$PERF_FILE" | tail -4
+fi
 ```
 
 ### Parsing Results

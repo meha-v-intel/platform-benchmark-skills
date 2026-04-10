@@ -13,6 +13,28 @@ Run both checks and report. Always run preflight before any micro-benchmark.
 which numactl || dnf install -y numactl
 ```
 
+## Step 1.5 — Baseline Snapshot
+
+```bash
+# SMI baseline — reference point for HFT gate and anomaly detection
+which rdmsr 2>/dev/null || dnf install -y msr-tools
+modprobe msr 2>/dev/null || true
+SMI_BASELINE=$(rdmsr -a 0x34 2>/dev/null | head -1)
+echo "SMI baseline: ${SMI_BASELINE:-unavailable}"
+
+# CPU governor and boost state
+cpupower frequency-info | grep -E "governor|boost|current CPU frequency"
+
+# Turbostat idle snapshot — confirm boost enabled, C-states active, baseline power
+which turbostat 2>/dev/null || dnf install -y kernel-tools
+turbostat --interval 2 --num_iterations 1 --Summary 2>/dev/null \
+    | grep -E "Avg_MHz|Bzy_MHz|Busy%|Pkg%pc6|PkgWatt" \
+    || echo "turbostat: unavailable — install kernel-tools"
+```
+
+**Pass**: governor = `performance`, boost = `enabled`.
+**Fail**: `powersave` governor or boost disabled will invalidate all frequency and throughput benchmarks — fix before proceeding.
+
 ## Step 2 — NUMA Check
 ```bash
 numactl --hardware
@@ -47,6 +69,9 @@ PREFLIGHT RESULTS
 NUMA Check  : PASS/FAIL  — N nodes, X GiB, 32 cores, 1T/core
 C-State     : PASS/FAIL  — driver: intel_idle, states: [list]
               DMR deepest C6 exit: 110µs (vs GNR 210µs, -47.6%)
+Governor    : PASS/FAIL  — performance / [actual governor]
+Boost       : PASS/FAIL  — enabled / disabled
+Baseline    : SMI=N, idle PkgWatt=X W, Bzy_MHz=Y
 Preflight   : PASS — safe to proceed / FAIL — investigate before continuing
 ```
 

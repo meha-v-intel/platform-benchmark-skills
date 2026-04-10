@@ -38,6 +38,14 @@ sudo wult deploy
 ```bash
 cpupower frequency-set -g performance
 cpupower idle-info   # confirm C1E, C6 are available
+
+# C6 residency MSR baseline — confirm core reaches C6 during idle
+modprobe msr 2>/dev/null || true
+echo "C6 residency MSR (0x3FC) on CPU0: $(rdmsr -p 0 0x3FC 2>/dev/null || echo unavailable)"
+
+# Interrupt baseline — detect background interrupt noise before test
+INTR_BEFORE=$(awk '/^CPU0/{print $2}' /proc/interrupts 2>/dev/null || grep "^  0:" /proc/interrupts | awk '{print $2}')
+echo "Interrupt baseline (CPU0): ${INTR_BEFORE:-unavailable}"
 ```
 
 ## Step 4 — Choose a test CPU
@@ -98,6 +106,23 @@ for m, v in stats.items():
     else:
         gnr_note = f"  GNR: {GNR[m]} µs" if m in GNR else ""
         print(f"  {m:8}: {v:.2f} µs{gnr_note}")
+
+# Post-run interrupt delta — detect background noise during test
+import subprocess as sp
+intr_after_raw = sp.run(['awk', '/^CPU0/{print $2}', '/proc/interrupts'],
+                        capture_output=True, text=True).stdout.strip()
+print(f"\nPost-run interrupt check: {intr_after_raw or 'unavailable'}")
+print("  (compare to baseline captured in Step 3 — large delta = SMI/IRQ interference)")
+
+# dmesg NMI/watchdog check
+nmi = sp.run(['dmesg', '--level=warn,err,crit'], capture_output=True, text=True)
+hits = [l for l in nmi.stdout.splitlines() if any(k in l.lower() for k in ['nmi','watchdog','rcu stall','hard lockup'])]
+if hits:
+    print(f"\nWARN: dmesg anomalies during test:")
+    for h in hits[-5:]:
+        print(f"  {h}")
+else:
+    print("dmesg: no NMI/watchdog/RCU stall anomalies detected")
 ```
 
 ## Pass Criteria

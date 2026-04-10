@@ -18,6 +18,15 @@ which mlc || ls /root/mlc 2>/dev/null || echo "MLC needed — download from Inte
 # THP and governor
 echo always > /sys/kernel/mm/transparent_hugepage/enabled
 cpupower frequency-set -g performance
+
+# DIMM presence and spec verification
+dmidecode -t 17 2>/dev/null \
+    | grep -E "Size|Type:|Speed:|Configured Memory Speed|Bank Locator|Part Number" \
+    | grep -v "No Module" \
+    || echo "dmidecode: unavailable — cannot verify DIMM population"
+
+# NUMA remote-access baseline (expect all zeros before test)
+numastat -c 2>/dev/null || numastat 2>/dev/null | head -20
 ```
 
 ## 1. Memory Latency (~2 min)
@@ -42,6 +51,16 @@ GNR reference: 1T→16.3 GB/s, 8T→92.7 GB/s, 16T→110.7 GB/s. Full-system (48
 # Run sweep script (MAX_CORES=32 for this system)
 MLC=${MLC:-/root/mlc}
 mkdir -p /data/mlc_res && rm -rf /data/mlc_res/*
+
+# Start perf stat to capture LLC/TLB miss rates across the entire sweep
+perf stat -a \
+    -e LLC-loads,LLC-load-misses,dTLB-loads,dTLB-load-misses,\
+L1-dcache-loads,L1-dcache-load-misses \
+    --interval-print 10000 \
+    -o /data/mlc_res/perf_stat.txt \
+    -- sleep 9999 2>/dev/null &
+PERF_PID=$!
+
 for i in $(seq 1 32); do
     numactl -m 0 $MLC --loaded_latency -e -b1g -t50 -T -k"1-${i}" -d0 -W2 \
          >> /data/mlc_res/bw_mlc_${i}.log 2>&1 &
@@ -53,14 +72,29 @@ for i in $(seq 1 32); do
     echo "$i $bw $lat" >> /data/mlc_res/lat_bw.data
     echo "cores=$i BW=${bw}MB/s LAT=${lat}ns"
 done
+
+kill $PERF_PID 2>/dev/null; wait $PERF_PID 2>/dev/null || true
+
+# RAPL DRAM energy (memory subsystem power efficiency)
+perf stat -a -e power/energy-dram/ -- sleep 5 2>&1 | grep energy-dram \
+    || echo "RAPL DRAM energy: unavailable"
+
+# NUMA remote-access delta (should be near zero with --localalloc)
+echo "--- NUMA remote access post-sweep ---"
+numastat -c 2>/dev/null || numastat 2>/dev/null | head -20
 ```
 Pass: latency increase ≤ 15% at 70% of peak BW. GNR: +28.6% (failed). DMR expected flatter.
+Flag if `numastat` shows significant remote node hits — indicates NUMA binding issue.
 
 ## Report Format
 ```
 MEMORY BENCHMARK RESULTS
 ========================
+DIMM Config      : N × DDR5-XXXXX (dmidecode -t 17)
 Memory Latency   : PASS  — 2GiB: XXX ns (threshold: ≤139 ns, GNR: 116 ns, delta: ±X%)
 Memory Bandwidth : PASS  — All-reads: XXXX GBps (threshold: ≥1454 GBps, GNR: 158 GB/s/socket)
 Lat-BW Curve     : PASS  — Peak XXXX GBps, idle XXX ns, @70%BW: XXX ns (+X.X%, ≤15%)
+LLC Miss Rate    : X.X%  (perf stat — high rate suggests working set > LLC)
+DRAM Energy      : X.X J / 5s  (RAPL power/energy-dram)
+NUMA Remote Hits : N  (expect 0 — non-zero means binding misconfiguration)
 ```

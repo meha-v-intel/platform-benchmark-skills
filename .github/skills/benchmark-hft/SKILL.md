@@ -37,6 +37,12 @@ cat /proc/cmdline | grep nohz   # expect: nohz=off
 
 # 6. irqbalance stopped
 systemctl is-active irqbalance   # expect: inactive
+
+# 7. NIC baseline stats — capture before test to detect drops post-run
+IFACE=$(ip -o link show | awk -F': ' '!/lo/{print $2; exit}')
+ethtool -S $IFACE 2>/dev/null | grep -E "rx.*drop|tx.*drop|missed|error" \
+    | tee /tmp/hft_nic_baseline.txt \
+    || echo "ethtool -S: unavailable for $IFACE"
 ```
 
 If SMI delta > 0: **STOP**. Report as HFT-BLOCK. Recommend: disable patrol scrubbing in BIOS (`Socket Configuration → Memory Configuration → Patrol Scrub → Disable`) and runtime RAS SMIs.
@@ -76,6 +82,14 @@ Measures baseline single-thread latency.
 RESULTS_DIR=/tmp/fsi-benchmarks/$(date +%Y%m%dT%H%M)-hft/bench/hft_compute
 mkdir -p $RESULTS_DIR
 
+# Start turbostat to monitor frequency stability during compute tests
+turbostat --interval 1 --show Avg_MHz,Bzy_MHz,Busy%,PkgWatt \
+    > $RESULTS_DIR/turbostat_hft.txt 2>/dev/null &
+TURBO_PID=$!
+
+# Continuous SMI monitor — detect any SMIs that occur during test (not just baseline)
+SMI_START=$(rdmsr -a 0x34 2>/dev/null | head -1)
+
 echo "=== hft_rdtscp 1r1w — 5 runs ===" | tee $RESULTS_DIR/hft_1r1w.log
 for run in 1 2 3 4 5; do
     echo -n "Run $run: "
@@ -112,6 +126,30 @@ done
 ### Compute Results Parsing
 
 ```bash
+# Stop turbostat and SMI monitors after all compute tests complete
+kill $TURBO_PID 2>/dev/null; wait $TURBO_PID 2>/dev/null || true
+
+# SMI delta during entire compute test window
+SMI_END=$(rdmsr -a 0x34 2>/dev/null | head -1)
+SMI_DURING=$((16#${SMI_END:-0} - 16#${SMI_START:-0}))
+[ "$SMI_DURING" -gt 0 ] && echo "WARN: $SMI_DURING SMI(s) occurred during hft_rdtscp tests" \
+    || echo "SMI during test: 0 (clean)"
+
+# Frequency stability check
+awk 'NR>1 && $2~/[0-9]/{if($2>mx)mx=$2; if(mn==0||$2<mn)mn=$2} \
+     END{if(mx>0) printf "Freq during test: min=%.0f max=%.0f MHz — %s\n", mn, mx, \
+         (mx-mn)/mx>0.05 ? "WARN: >5% droop (possible power/thermal throttle)" : "stable"}' \
+    $RESULTS_DIR/turbostat_hft.txt 2>/dev/null || true
+
+# NIC drop check — compare to baseline captured in prerequisites
+IFACE=$(ip -o link show | awk -F': ' '!/lo/{print $2; exit}')
+echo "--- NIC stats delta (drops since baseline) ---"
+ethtool -S $IFACE 2>/dev/null | grep -E "rx.*drop|tx.*drop|missed|error" \
+    | tee /tmp/hft_nic_after.txt || true
+diff /tmp/hft_nic_baseline.txt /tmp/hft_nic_after.txt 2>/dev/null \
+    | grep '^[<>]' | awk '{print "  NIC delta:", $0}' \
+    || echo "  NIC delta: baseline unavailable"
+
 # Extract avg ± std for each test
 for test in 1r1w 24r1w 24r3w; do
     echo -n "hft_rdtscp $test: "

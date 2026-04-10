@@ -13,6 +13,20 @@ Argument: `$ARGUMENTS` — one of `max-freq`, `turbo-curve`, `core-to-core`, or 
 ## CRITICAL: DMR turbostat rule
 **Never measure idle cores.** DMR's C6 substates (C6A/C6S/C6SP) stop the TSC, causing turbostat exit 253. Always pin a busy loop to the CPU being measured.
 
+## Pre-run Baseline
+```bash
+# Actual P-state ratio (IA32_PERF_CTL MSR) and HWP mode
+modprobe msr 2>/dev/null || true
+echo "Current P-state ratio (MSR 0x198): $(rdmsr -f 15:8 0x198 2>/dev/null | head -1 || echo unavailable)"
+echo "HWP enabled (MSR 0x770 bit 0): $(rdmsr -f 0:0 0x770 2>/dev/null | head -1 || echo unavailable)"
+
+# Thermal baseline — headroom to throttle point
+paste \
+    <(cat /sys/class/thermal/thermal_zone*/type 2>/dev/null) \
+    <(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | awk '{printf "%.1f°C\n", $1/1000}') \
+    2>/dev/null || echo "thermal sysfs: unavailable"
+```
+
 ## Max Frequency Test (~12s)
 ```bash
 sudo cpupower frequency-set -g performance
@@ -20,10 +34,19 @@ taskset -c 1 bash -c 'while :; do :; done' &
 LOOP_PID=$!
 sleep 1
 ps -o pid,psr,comm -C bash   # confirm PSR=1
-sudo turbostat --cpu 1 --interval 1
+
+# Monitor frequency AND package power during the busy loop
+sudo turbostat --cpu 1 --interval 1 --show \
+    Avg_MHz,Bzy_MHz,Busy%,PkgWatt,CorWatt,CoreTmp,PkgTmp 2>/dev/null \
+    | tee /tmp/cpu_maxfreq_turbostat.txt
 kill $LOOP_PID; wait $LOOP_PID 2>/dev/null
+
+# Post-run thermal margin check
+MAX_TEMP=$(awk 'NR>1 && $6~/[0-9]/{if($6>m)m=$6} END{print m+0}' /tmp/cpu_maxfreq_turbostat.txt)
+echo "Peak CoreTmp during test: ${MAX_TEMP}°C  (throttle typically at 105°C — margin: $((105-MAX_TEMP))°C)"
 ```
 Parse: max `Bzy_MHz`. Pass ≥ 3600 MHz. GNR: 3300 MHz. DMR BKC expected: ~2799 MHz.
+Flag if `PkgWatt` shows sustained drop mid-test (power throttle) or `CoreTmp` > 95°C (thermal throttle).
 
 ## Turbo Curve (~2 min, 31 steps)
 **BKM script** (GNR reference, adapt LOAD_CORES for DMR's 31 cores): `scripts/turbo_curve_imperia_final.sh`
@@ -70,6 +93,9 @@ Parse max off-diagonal. Pass ≤ 180 cycles. GNR: 63–71 cycles intra-SNC.
 CPU BENCHMARK RESULTS
 =====================
 Max Frequency : FAIL  — 2799 MHz (threshold: ≥3600 MHz, GNR: 3300 MHz, -15.2%)
+  PkgWatt peak: XX W | CoreTmp peak: XX°C (margin: XX°C to throttle)
+  P-state MSR: 0xXX | HWP: enabled/disabled
 Turbo Curve   : PASS  — 1-core: XXXX MHz, 31-core: XXXX MHz, spread: XXX MHz
 Core-to-Core  : PASS  — max XX cycles (threshold: ≤180, GNR: 63-71 intra-SNC)
+Thermal       : PASS/WARN — peak XX°C, XX°C headroom  [WARN if < 10°C margin]
 ```

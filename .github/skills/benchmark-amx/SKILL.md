@@ -26,9 +26,15 @@ export LD_LIBRARY_PATH=$(dirname $BENCHDNN)/../../src:$LD_LIBRARY_PATH
 echo "benchdnn: $BENCHDNN"
 ```
 
-## Step 2 — Confirm NUMA topology
+## Step 2 — Confirm NUMA topology and baseline power state
 ```bash
 numactl --hardware
+
+# Turbostat idle snapshot — confirm frequency scaling active and establish power baseline
+which turbostat 2>/dev/null || dnf install -y kernel-tools
+turbostat --interval 2 --num_iterations 1 --Summary 2>/dev/null \
+    | grep -E "Avg_MHz|Bzy_MHz|Busy%|PkgWatt|Pkg%pc6" \
+    || echo "turbostat: unavailable — install kernel-tools"
 ```
 Iso-core CPUs selected from NUMA node 0. On GNR BKM: `ISO_CORES=0,2,4,6,8,10,12,14`
 
@@ -45,6 +51,17 @@ export OMP_PLACES=cores
 ISO_CORES=0,1,2,3,4,5,6,7
 export OMP_NUM_THREADS=8
 
+# Start turbostat and RAPL monitors in background — span both BF16 and INT8 runs
+turbostat --interval 1 --show Avg_MHz,Bzy_MHz,Busy%,PkgWatt,CorWatt,CoreTmp \
+    > /tmp/amx_iso_turbostat.txt 2>/dev/null &
+TURBO_PID=$!
+
+# RAPL energy — package + core counters
+perf stat -a -e power/energy-pkg/,power/energy-cores/ \
+    -o /tmp/amx_iso_rapl.txt \
+    -- sleep 9999 2>/dev/null &
+RAPL_PID=$!
+
 echo "=== BF16 iso-core ==="
 numactl --physcpubind=$ISO_CORES --membind=0 \
     $BENCHDNN --mode=P --conv --dt=bf16 \
@@ -54,6 +71,17 @@ echo "=== INT8 iso-core ==="
 numactl --physcpubind=$ISO_CORES --membind=0 \
     $BENCHDNN --mode=P --conv --dt=s8 \
     ic128oc128ih56oh56kh3ph1n32 2>/dev/null | tee /tmp/amx_int8_iso.txt
+
+kill $TURBO_PID $RAPL_PID 2>/dev/null; wait $TURBO_PID $RAPL_PID 2>/dev/null || true
+
+# Verify AMX instructions actually executed (not VNNI fallback)
+perf stat -a --no-big-num \
+    -e fp_arith_inst_retired.512b_packed_bf16,fp_arith_inst_retired.1024b_packed_bf16,\
+amx_tile_retired.tilezero,amx_tile_retired.tilelconfig \
+    -- numactl --physcpubind=$ISO_CORES --membind=0 \
+       $BENCHDNN --mode=P --conv --dt=bf16 \
+       ic128oc128ih56oh56kh3ph1n32 2>&1 | tee /tmp/amx_perf_verify.txt \
+    || echo "AMX perf events: unavailable on this kernel"
 ```
 
 ## Iso-core 30% utilization test (OMP_NUM_THREADS=2 — BKM steps 5–6)
@@ -90,7 +118,7 @@ numactl --interleave=all \
 
 ## Parse and Report
 ```python
-import re, sys
+import re, sys, subprocess
 
 def parse_gflops(path):
     try:
@@ -100,10 +128,20 @@ def parse_gflops(path):
     except FileNotFoundError:
         return None
 
+def parse_rapl(path):
+    """Extract Joules from perf stat RAPL output."""
+    try:
+        text = open(path).read()
+        m = re.search(r'([\d,.]+)\s+Joules\s+power/energy-pkg/', text)
+        return float(m.group(1).replace(',','')) if m else None
+    except FileNotFoundError:
+        return None
+
 bf16_iso  = parse_gflops('/tmp/amx_bf16_iso.txt')
 int8_iso  = parse_gflops('/tmp/amx_int8_iso.txt')
 bf16_full = parse_gflops('/tmp/amx_bf16_full.txt')
 int8_full = parse_gflops('/tmp/amx_int8_full.txt')
+pkg_joules = parse_rapl('/tmp/amx_iso_rapl.txt')
 
 GNR_BF16_ISO = 12600   # GFLOPS (12.6 TFLOPS)
 GNR_INT8_ISO = 22900   # TOPS  (22.9 TOPS)
@@ -114,6 +152,8 @@ if bf16_iso:
     delta = (bf16_iso - GNR_BF16_ISO) / GNR_BF16_ISO * 100
     status = "PASS" if bf16_iso > GNR_BF16_ISO else "FAIL"
     print(f"BF16 iso-core (8C): {bf16_iso:.0f} GFLOPS  (GNR: 12600, delta: {delta:+.1f}%) — {status}")
+    if pkg_joules:
+        print(f"  Power efficiency: {bf16_iso/pkg_joules*1e3:.1f} GFLOPS/W  (lower energy = better)")
 if int8_iso:
     delta = (int8_iso - GNR_INT8_ISO) / GNR_INT8_ISO * 100
     status = "PASS" if int8_iso > GNR_INT8_ISO else "FAIL"
@@ -122,6 +162,16 @@ if bf16_full:
     print(f"BF16 full (32C):    {bf16_full:.0f} GFLOPS  (informational — GNR was 240C)")
 if int8_full:
     print(f"INT8 full (32C):    {int8_full:.0f} TOPS    (informational)")
+
+# Frequency droop check from turbostat log
+try:
+    freqs = [float(l.split()[1]) for l in open('/tmp/amx_iso_turbostat.txt')
+             if len(l.split()) > 1 and l.split()[1].replace('.','').isdigit()]
+    if freqs:
+        print(f"Freq during AMX: min={min(freqs):.0f} max={max(freqs):.0f} MHz "
+              f"— {'WARN: droop > 5%' if (max(freqs)-min(freqs))/max(freqs)>0.05 else 'stable'}")
+except (FileNotFoundError, ValueError, IndexError):
+    pass
 ```
 
 ## Pass Criteria
