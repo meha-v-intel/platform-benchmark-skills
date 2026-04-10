@@ -1,6 +1,6 @@
 # Storage Skills Checklist
 **Source:** `Storage_Segment_Validation_v0.5.xlsx` › Sheet: `1 Node StorageSegment Tests`  
-**Last updated:** April 10, 2026 (rev 2 — compression + erasure coding skills added)  
+**Last updated:** April 10, 2026 (rev 3 — hashing skill added; 7 skills total)  
 **System:** DMR 1S×32C×1T | 1×Micron 7450 NVMe (PCIe Gen5×4, 1.92TB) | 30GB RAM | CentOS Stream 10
 
 ---
@@ -134,16 +134,18 @@
 
 | Item | Status |
 |---|---|
-| **Eligibility** | ✅ ELIGIBLE (OpenSSL SHA subtests) · 🔧 NEEDS BUILD (SMHasher3 subtests) |
-| **Skill file** | ❌ Not yet created |
-| **Doc depth** | 0% |
-| **Tested live** | ❌ No (though OpenSSL is confirmed installed and ready) |
-| **Subtests covered** | 0 / 312 |
-| **Ready to run now** | 76 subtests — SHA2-256 × 26 buffer sizes + SHA2-512 × 26 buffer sizes (×2 runs each) |
-| **Needs build** | 236 subtests — SMHasher3 (cmake build from [rurban/smhasher](https://github.com/rurban/smhasher)) |
-| **Branch** | — |
+| **Eligibility** | ✅ ELIGIBLE (full — OpenSSL + SMHasher3 both functional) |
+| **Skill file** | ✅ `storage-hashing/SKILL.md` (564 lines) |
+| **Doc depth** | ✅ ~88% — Groups A–E + EMON + full baselines |
+| **Tested live** | ✅ Yes — SHA-256 26-pt sweep, SHA-512 26-pt sweep, 15 SMHasher3 hashes |
+| **Subtests covered** | ~164 / 312 |
+| **SMHasher3** | ✅ Built from [fwojcik/smhasher3](https://gitlab.com/fwojcik/smhasher3) at `/root/smhasher3/build/SMHasher3` (336 hashes, cmake 3.31.8) |
+| **SHA-NI confirmed** | ✅ `sha_ni` in /proc/cpuinfo on all 32 cores |
+| **Branch** | `storage-skills` (commit `704e43b`) |
 
-**Notes:** SHA2-256 and SHA2-512 sweeps are identical in approach to Test 104 (same `openssl speed -evp` tool, same buffer sizes). Skill could be created and 76 subtests measured in ~1 hour. SMHasher3 build is feasible (cmake + C++, ~10 min build).
+**DMR baselines:** SHA-256 peak = 2.627 GB/s (1 GiB buf) · SHA-512 peak = 0.729 GB/s · XXH3-64 = 134.86 GiB/s (avx512) · CRC-32C = 34.42 GiB/s · MeowHash = 115.61 GiB/s (aesni) · wyhash = 13.77 cyc/hash (fastest small-key)
+
+**Notes:** SHA-1 bulk (SMHasher3) timed out at 60–90 s — documented as OpenSSL equivalent (1.724 GB/s @ 1 MB). The remaining ~148 subtests are additional SMHasher3 hashes not in the skill — FarmHash/CityHash variants, SipHash-1-3, additional MurmurHash2/3 variants, and miscellaneous hashes; the critical ones are all documented with live baselines.
 
 ---
 
