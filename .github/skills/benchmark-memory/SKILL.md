@@ -19,6 +19,15 @@ which mlc || ls /root/mlc 2>/dev/null || echo "MLC needed — download from Inte
 echo always > /sys/kernel/mm/transparent_hugepage/enabled
 cpupower frequency-set -g performance
 
+# Output directory — persistent; never /tmp/
+OUTDIR=${BENCHMARK_OUTDIR:-/datafs/benchmarks}/$(date +%Y%m%dT%H%M)-memory
+mkdir -p $OUTDIR/{bench/mlc,emon,monitor,sysconfig}
+lscpu                        > $OUTDIR/sysconfig/cpu_info.txt
+numactl --hardware           > $OUTDIR/sysconfig/numa_topology.txt
+dmidecode -t 17 2>/dev/null  > $OUTDIR/sysconfig/dimm_info.txt
+cpupower frequency-info      > $OUTDIR/sysconfig/cpupower.txt 2>&1
+echo "Output dir: $OUTDIR"
+
 # DIMM presence and spec verification
 dmidecode -t 17 2>/dev/null \
     | grep -E "Size|Type:|Speed:|Configured Memory Speed|Bank Locator|Part Number" \
@@ -50,26 +59,26 @@ GNR reference: 1T→16.3 GB/s, 8T→92.7 GB/s, 16T→110.7 GB/s. Full-system (48
 ```bash
 # Run sweep script (MAX_CORES=32 for this system)
 MLC=${MLC:-/root/mlc}
-mkdir -p /data/mlc_res && rm -rf /data/mlc_res/*
+mkdir -p $OUTDIR/bench/mlc && rm -rf $OUTDIR/bench/mlc/*
 
 # Start perf stat to capture LLC/TLB miss rates across the entire sweep
 perf stat -a \
     -e LLC-loads,LLC-load-misses,dTLB-loads,dTLB-load-misses,\
 L1-dcache-loads,L1-dcache-load-misses \
     --interval-print 10000 \
-    -o /data/mlc_res/perf_stat.txt \
+    -o $OUTDIR/emon/perf_stat.txt \
     -- sleep 9999 2>/dev/null &
 PERF_PID=$!
 
 for i in $(seq 1 32); do
     numactl -m 0 $MLC --loaded_latency -e -b1g -t50 -T -k"1-${i}" -d0 -W2 \
-         >> /data/mlc_res/bw_mlc_${i}.log 2>&1 &
+         >> $OUTDIR/bench/mlc/bw_mlc_${i}.log 2>&1 &
     sleep 20
-    numactl -m 0 $MLC --idle_latency -b2g -c0 -r -t20 > /data/mlc_res/lat_mlc_${i}.log
-    lat=$(grep frequency /data/mlc_res/lat_mlc_${i}.log | awk '{print $9}')
+    numactl -m 0 $MLC --idle_latency -b2g -c0 -r -t20 > $OUTDIR/bench/mlc/lat_mlc_${i}.log
+    lat=$(grep frequency $OUTDIR/bench/mlc/lat_mlc_${i}.log | awk '{print $9}')
     wait
-    bw=$(grep -E '^[0-9]+\s+[0-9]+' /data/mlc_res/bw_mlc_${i}.log | tail -1 | awk '{print $3}')
-    echo "$i $bw $lat" >> /data/mlc_res/lat_bw.data
+    bw=$(grep -E '^[0-9]+\s+[0-9]+' $OUTDIR/bench/mlc/bw_mlc_${i}.log | tail -1 | awk '{print $3}')
+    echo "$i $bw $lat" >> $OUTDIR/bench/mlc/lat_bw.data
     echo "cores=$i BW=${bw}MB/s LAT=${lat}ns"
 done
 
@@ -85,6 +94,24 @@ numastat -c 2>/dev/null || numastat 2>/dev/null | head -20
 ```
 Pass: latency increase ≤ 15% at 70% of peak BW. GNR: +28.6% (failed). DMR expected flatter.
 Flag if `numastat` shows significant remote node hits — indicates NUMA binding issue.
+
+## Mandatory Reports
+
+After every memory benchmark run, write `deep_dive_report.md` and `tuning_recommendations.md` to `$OUTDIR/`. Follow the template in [run-benchmark/SKILL.md](../run-benchmark/SKILL.md#mandatory-reports).
+
+The **Monitoring Telemetry** section of the deep dive must include:
+
+| File | Monitoring tool | Metrics |
+|---|---|---|
+| `$OUTDIR/sysconfig/cpu_info.txt` | lscpu | CPU model, LLC size |
+| `$OUTDIR/sysconfig/dimm_info.txt` | dmidecode -t 17 | DIMM speed and population |
+| `$OUTDIR/sysconfig/cpupower.txt` | cpupower | Governor, boost |
+| `$OUTDIR/emon/perf_stat.txt` | perf stat | LLC miss rate, dTLB misses, L1D miss rate across sweep |
+| `$OUTDIR/monitor/numastat_pre.txt` | numastat | NUMA remote accesses before test |
+| `$OUTDIR/monitor/numastat_post.txt` | numastat | NUMA remote accesses after test (delta expected = 0) |
+| `$OUTDIR/bench/mlc/lat_bw.data` | MLC | Latency (ns) vs bandwidth (MB/s) per core count |
+| `$OUTDIR/bench/mlc/lat_mlc_N.log` | MLC --idle_latency | DRAM latency at N active cores |
+| `$OUTDIR/bench/mlc/bw_mlc_N.log` | MLC --loaded_latency | Memory bandwidth at N active cores |
 
 ## Report Format
 ```

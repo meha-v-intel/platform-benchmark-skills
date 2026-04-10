@@ -15,6 +15,16 @@ Argument: `$ARGUMENTS` — one of `max-freq`, `turbo-curve`, `core-to-core`, or 
 
 ## Pre-run Baseline
 ```bash
+# Output directory — persistent; never /tmp/
+OUTDIR=${BENCHMARK_OUTDIR:-/datafs/benchmarks}/$(date +%Y%m%dT%H%M)-cpu
+mkdir -p $OUTDIR/{bench,emon,monitor,sysconfig}
+lscpu                        > $OUTDIR/sysconfig/cpu_info.txt
+numactl --hardware           > $OUTDIR/sysconfig/numa_topology.txt
+dmidecode -t 17 2>/dev/null  > $OUTDIR/sysconfig/dimm_info.txt
+cpupower frequency-info      > $OUTDIR/sysconfig/cpupower.txt 2>&1
+rdmsr -a 0x34 2>/dev/null    > $OUTDIR/sysconfig/smi_baseline.txt
+echo "Output dir: $OUTDIR"
+
 # Actual P-state ratio (IA32_PERF_CTL MSR) and HWP mode
 modprobe msr 2>/dev/null || true
 echo "Current P-state ratio (MSR 0x198): $(rdmsr -f 15:8 0x198 2>/dev/null | head -1 || echo unavailable)"
@@ -38,11 +48,11 @@ ps -o pid,psr,comm -C bash   # confirm PSR=1
 # Monitor frequency AND package power during the busy loop
 sudo turbostat --cpu 1 --interval 1 --show \
     Avg_MHz,Bzy_MHz,Busy%,PkgWatt,CorWatt,CoreTmp,PkgTmp 2>/dev/null \
-    | tee /tmp/cpu_maxfreq_turbostat.txt
+    | tee $OUTDIR/bench/cpu_maxfreq_turbostat.txt
 kill $LOOP_PID; wait $LOOP_PID 2>/dev/null
 
 # Post-run thermal margin check
-MAX_TEMP=$(awk 'NR>1 && $6~/[0-9]/{if($6>m)m=$6} END{print m+0}' /tmp/cpu_maxfreq_turbostat.txt)
+MAX_TEMP=$(awk 'NR>1 && $6~/[0-9]/{if($6>m)m=$6} END{print m+0}' $OUTDIR/bench/cpu_maxfreq_turbostat.txt)
 echo "Peak CoreTmp during test: ${MAX_TEMP}°C  (throttle typically at 105°C — margin: $((105-MAX_TEMP))°C)"
 ```
 Parse: max `Bzy_MHz`. Pass ≥ 3600 MHz. GNR: 3300 MHz. DMR BKC expected: ~2799 MHz.
@@ -56,7 +66,7 @@ Use the adapter:
 import sys; sys.path.insert(0, '/root/benchmark_automation')
 from pathlib import Path
 from benchmarks.turbo_curve import TurboCurveAdapter
-a = TurboCurveAdapter(Path('/tmp/turbo_curve'))
+a = TurboCurveAdapter(Path('$OUTDIR/bench/turbo_curve'))
 a.setup(); a.run()
 r = a.collect_results()
 print(r.status)
@@ -81,12 +91,28 @@ ls /root/core-to-core-latency/target/release/core-to-core-latency 2>/dev/null ||
 C2C=/root/core-to-core-latency/target/release/core-to-core-latency
 
 # Quick test (8 cores, ~30s)
-sudo $C2C 500 20 --cores 0,1,2,3,4,5,6,7 --csv | tee /tmp/c2c_quick.csv
+sudo $C2C 500 20 --cores 0,1,2,3,4,5,6,7 --csv | tee $OUTDIR/bench/c2c_quick.csv
 
 # Full 32-core matrix (~3 min) — BKM step 6: 1000 iterations, 300 samples
-sudo $C2C 1000 300 --cores $(seq -s, 0 31) --csv | tee /tmp/c2c_full.csv
+sudo $C2C 1000 300 --cores $(seq -s, 0 31) --csv | tee $OUTDIR/bench/c2c_full.csv
 ```
 Parse max off-diagonal. Pass ≤ 180 cycles. GNR: 63–71 cycles intra-SNC.
+
+## Mandatory Reports
+
+After every CPU benchmark run, write `deep_dive_report.md` and `tuning_recommendations.md` to `$OUTDIR/`. Follow the template in [run-benchmark/SKILL.md](../run-benchmark/SKILL.md#mandatory-reports).
+
+The **Monitoring Telemetry** section of the deep dive must include:
+
+| File | Monitoring tool | Metrics |
+|---|---|---|
+| `$OUTDIR/sysconfig/cpu_info.txt` | lscpu | CPU model, freq, ISA |
+| `$OUTDIR/sysconfig/cpupower.txt` | cpupower | Governor, boost state |
+| `$OUTDIR/sysconfig/smi_baseline.txt` | rdmsr 0x34 | SMI count before run |
+| `$OUTDIR/sysconfig/dimm_info.txt` | dmidecode -t 17 | DIMM population |
+| `$OUTDIR/bench/cpu_maxfreq_turbostat.txt` | turbostat | Bzy_MHz, PkgWatt, CoreTmp per 1s interval |
+| `$OUTDIR/bench/turbo_curve/` | turbostat sweep | MHz vs active-core-count |
+| `$OUTDIR/bench/c2c_full.csv` | core-to-core-latency | Round-trip latency matrix (ns) |
 
 ## Report Format
 ```

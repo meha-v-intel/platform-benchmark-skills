@@ -10,7 +10,7 @@ allowed-tools: Bash
 
 **Scope:** Intel FSI Segment Validation — HFT (High-Frequency Trading) + HPC Grid  
 **Platforms:** DMR, GNR-SP, EMR, AMD Turin (auto-detected at runtime)  
-**Output dir:** `/tmp/fsi-benchmarks/<timestamp>-fsi/`  
+**Output dir:** `${BENCHMARK_OUTDIR:-/datafs/fsi-benchmarks}/<timestamp>-fsi/` (persistent; never `/tmp/`)
 **Test Plan ref:** Segment Validation - FSI Test Plan v0.91
 
 ## Quick Reference
@@ -243,10 +243,11 @@ fi
 ## Output Directory Structure
 
 ```
-/tmp/fsi-benchmarks/<TIMESTAMP>-fsi/
+${BENCHMARK_OUTDIR:-/datafs/fsi-benchmarks}/<TIMESTAMP>-fsi/
 ├── sysconfig/
 │   ├── cpu_info.txt          # lscpu + /proc/cpuinfo
 │   ├── numa_topology.txt     # numactl --hardware
+│   ├── dimm_info.txt         # dmidecode -t 17
 │   ├── bios_knobs.txt        # relevant MSRs, C-state driver, HWP state
 │   └── nic_info.txt          # lspci, ethtool (if Solarflare present)
 ├── bench/
@@ -255,8 +256,10 @@ fi
 │   ├── hft_network/          # eflatency, sfnt-pingpong outputs
 │   ├── hpc_workloads/        # Monte Carlo per-workload CSVs
 │   └── hpc_accelerator/      # QAT, IAA, DSA outputs
-├── emon/                     # perf stat collection (if enabled)
-└── report.md                 # auto-generated pass/fail report
+├── emon/                     # perf stat collection per workload
+├── monitor/                  # turbostat, RAPL, numastat pre/post, NIC baseline
+├── deep_dive_report.md       # REQUIRED — platform summary + monitoring telemetry + results
+└── tuning_recommendations.md # REQUIRED — even if all KPIs pass
 ```
 
 ---

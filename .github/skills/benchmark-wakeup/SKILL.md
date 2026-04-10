@@ -57,30 +57,38 @@ TEST_CPU=1
 
 ## Step 5 — Run benchmark
 ```bash
-OUTDIR=/tmp/wakeup_latency_$(date +%Y%m%d_%H%M%S)
+OUTDIR=${BENCHMARK_OUTDIR:-/datafs/benchmarks}/$(date +%Y%m%dT%H%M)-wakeup
+mkdir -p $OUTDIR/{bench,sysconfig}
+
+# Capture sysconfig snapshot before run
+lscpu                        > $OUTDIR/sysconfig/cpu_info.txt
+numactl --hardware           > $OUTDIR/sysconfig/numa_topology.txt
+cpupower frequency-info      > $OUTDIR/sysconfig/cpupower.txt 2>&1
+rdmsr -a 0x34 2>/dev/null    > $OUTDIR/sysconfig/smi_baseline.txt
+echo "Output dir: $OUTDIR"
 
 # Short test (~5 min, ~100k datapoints — BKM step 8)
 sudo wult start tdt \
     --cpu $TEST_CPU \
     --time-limit 300 \
     --stats "" \
-    --outdir ${OUTDIR}_short
+    --outdir $OUTDIR/bench/wult_short
 
 # Full test (~35 min, 1M datapoints — BKM recommended)
 sudo wult start tdt \
     --cpu $TEST_CPU \
     --datapoints 1000000 \
     --stats "" \
-    --outdir ${OUTDIR}_full
+    --outdir $OUTDIR/bench/wult_full
 
-wult calc ${OUTDIR}_short   # or ${OUTDIR}_full
+wult calc $OUTDIR/bench/wult_short   # or wult_full
 ```
 
 ## Step 6 — Parse and report
 ```python
 import subprocess, re, sys
 
-outdir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/wakeup_latency_latest"
+outdir = sys.argv[1] if len(sys.argv) > 1 else "/datafs/benchmarks/wakeup_latency_latest"
 
 result = subprocess.run(['wult', 'calc', outdir], capture_output=True, text=True)
 text = result.stdout + result.stderr
@@ -132,3 +140,17 @@ else:
 | max | ≤ 260 µs | 10.59 µs |
 
 DMR C6 substates have lower exit latency than GNR → expect improvement.
+
+## Mandatory Reports
+
+After every wakeup run, write `deep_dive_report.md` and `tuning_recommendations.md` to `$OUTDIR/`. Follow the template in [run-benchmark/SKILL.md](../run-benchmark/SKILL.md#mandatory-reports).
+
+The **Monitoring Telemetry** section of the deep dive must include:
+
+| File | Monitoring tool | Metrics |
+|---|---|---|
+| `$OUTDIR/sysconfig/cpu_info.txt` | lscpu | CPU model, C-state support |
+| `$OUTDIR/sysconfig/cpupower.txt` | cpupower | Governor, idle states |
+| `$OUTDIR/sysconfig/smi_baseline.txt` | rdmsr 0x34 | SMI count before run |
+| `$OUTDIR/bench/wult_short/` | wult (TDT) | C6 exit latency — 100k datapoints |
+| `$OUTDIR/bench/wult_full/` | wult (TDT) | C6 exit latency — 1M datapoints |

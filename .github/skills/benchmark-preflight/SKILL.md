@@ -11,6 +11,14 @@ Run both checks and report. Always run preflight before any micro-benchmark.
 ## Step 1 — Install numactl if missing
 ```bash
 which numactl || dnf install -y numactl
+
+# Output directory — persistent; never /tmp/
+OUTDIR=${BENCHMARK_OUTDIR:-/datafs/benchmarks}/$(date +%Y%m%dT%H%M)-preflight
+mkdir -p $OUTDIR/{sysconfig}
+lscpu                        > $OUTDIR/sysconfig/cpu_info.txt
+numactl --hardware           > $OUTDIR/sysconfig/numa_topology.txt
+cpupower frequency-info      > $OUTDIR/sysconfig/cpupower.txt 2>&1
+echo "Output dir: $OUTDIR"
 ```
 
 ## Step 1.5 — Baseline Snapshot
@@ -20,15 +28,19 @@ which numactl || dnf install -y numactl
 which rdmsr 2>/dev/null || dnf install -y msr-tools
 modprobe msr 2>/dev/null || true
 SMI_BASELINE=$(rdmsr -a 0x34 2>/dev/null | head -1)
-echo "SMI baseline: ${SMI_BASELINE:-unavailable}"
+echo "SMI baseline: ${SMI_BASELINE:-unavailable}" | tee -a $OUTDIR/sysconfig/cpupower.txt
 
-# CPU governor and boost state
-cpupower frequency-info | grep -E "governor|boost|current CPU frequency"
+# CPU governor and boost state — saved to sysconfig
+cpupower frequency-info | grep -E "governor|boost|current CPU frequency" | tee -a $OUTDIR/sysconfig/cpupower.txt
+
+# SMI baseline value to file
+echo "SMI_BASELINE=${SMI_BASELINE:-unavailable}" > $OUTDIR/sysconfig/smi_baseline.txt
 
 # Turbostat idle snapshot — confirm boost enabled, C-states active, baseline power
 which turbostat 2>/dev/null || dnf install -y kernel-tools
 turbostat --interval 2 --num_iterations 1 --Summary 2>/dev/null \
     | grep -E "Avg_MHz|Bzy_MHz|Busy%|Pkg%pc6|PkgWatt" \
+    | tee $OUTDIR/sysconfig/turbostat_idle.txt \
     || echo "turbostat: unavailable — install kernel-tools"
 ```
 
@@ -76,3 +88,19 @@ Preflight   : PASS — safe to proceed / FAIL — investigate before continuing
 ```
 
 See [full preflight reference](../.github/skills/run-benchmark/references/preflight.md) for detailed expected values.
+
+## Mandatory Reports
+
+After every preflight run, write `deep_dive_report.md` and `tuning_recommendations.md` to `$OUTDIR/`. Follow the template in [run-benchmark/SKILL.md](../run-benchmark/SKILL.md#mandatory-reports). Even if all checks pass, the tuning report must state "No misses — all preflight checks passed."
+
+Raw data files written by this skill:
+
+| File | Description |
+|---|---|
+| `$OUTDIR/sysconfig/cpu_info.txt` | lscpu — CPU model, cores, ISA |
+| `$OUTDIR/sysconfig/numa_topology.txt` | numactl --hardware — NUMA node sizes |
+| `$OUTDIR/sysconfig/cpupower.txt` | cpupower frequency-info + governor/boost |
+| `$OUTDIR/sysconfig/smi_baseline.txt` | SMI count before any benchmarks |
+| `$OUTDIR/sysconfig/turbostat_idle.txt` | turbostat idle snapshot — baseline power |
+| `$OUTDIR/deep_dive_report.md` | Required — platform summary + preflight results |
+| `$OUTDIR/tuning_recommendations.md` | Required — even if all checks pass |

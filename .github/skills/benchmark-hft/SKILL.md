@@ -17,6 +17,15 @@ Argument: `$ARGUMENTS` — `compute`, `network`, or `all` (default).
 Before any HFT test, confirm all of the following. These are hard gates — do not proceed if any fail.
 
 ```bash
+# Output directory — persistent; never /tmp/
+OUTDIR=${BENCHMARK_OUTDIR:-/datafs/fsi-benchmarks}/$(date +%Y%m%dT%H%M)-hft
+mkdir -p $OUTDIR/{bench/hft_compute,bench/hft_network,emon,monitor,sysconfig}
+lscpu                        > $OUTDIR/sysconfig/cpu_info.txt
+numactl --hardware           > $OUTDIR/sysconfig/numa_topology.txt
+dmidecode -t 17 2>/dev/null  > $OUTDIR/sysconfig/dimm_info.txt
+cpupower frequency-info      > $OUTDIR/sysconfig/cpupower.txt 2>&1
+echo "Output dir: $OUTDIR"
+
 # 1. SMI count must be zero
 SMI_BEFORE=$(sudo rdmsr -a 0x34 2>/dev/null | head -1)
 sleep 10
@@ -38,10 +47,10 @@ cat /proc/cmdline | grep nohz   # expect: nohz=off
 # 6. irqbalance stopped
 systemctl is-active irqbalance   # expect: inactive
 
-# 7. NIC baseline stats — capture before test to detect drops post-run
+# 7. NIC baseline stats — saved to file for post-run delta comparison
 IFACE=$(ip -o link show | awk -F': ' '!/lo/{print $2; exit}')
 ethtool -S $IFACE 2>/dev/null | grep -E "rx.*drop|tx.*drop|missed|error" \
-    | tee /tmp/hft_nic_baseline.txt \
+    | tee $OUTDIR/monitor/nic_baseline.txt \
     || echo "ethtool -S: unavailable for $IFACE"
 ```
 
@@ -79,7 +88,7 @@ XYZ=$((MAXCORE - 1))
 Measures baseline single-thread latency.
 
 ```bash
-RESULTS_DIR=/tmp/fsi-benchmarks/$(date +%Y%m%dT%H%M)-hft/bench/hft_compute
+RESULTS_DIR=$OUTDIR/bench/hft_compute
 mkdir -p $RESULTS_DIR
 
 # Start turbostat to monitor frequency stability during compute tests
@@ -145,8 +154,8 @@ awk 'NR>1 && $2~/[0-9]/{if($2>mx)mx=$2; if(mn==0||$2<mn)mn=$2} \
 IFACE=$(ip -o link show | awk -F': ' '!/lo/{print $2; exit}')
 echo "--- NIC stats delta (drops since baseline) ---"
 ethtool -S $IFACE 2>/dev/null | grep -E "rx.*drop|tx.*drop|missed|error" \
-    | tee /tmp/hft_nic_after.txt || true
-diff /tmp/hft_nic_baseline.txt /tmp/hft_nic_after.txt 2>/dev/null \
+    | tee $OUTDIR/monitor/nic_post.txt || true
+diff $OUTDIR/monitor/nic_baseline.txt $OUTDIR/monitor/nic_post.txt 2>/dev/null \
     | grep '^[<>]' | awk '{print "  NIC delta:", $0}' \
     || echo "  NIC delta: baseline unavailable"
 
@@ -197,7 +206,7 @@ See README.md → "Tests For Segment Validation" section for full setup.
 Measures 99th percentile ½ RTT for UDP, payload sizes 0–1584 bytes.
 
 ```bash
-NET_DIR=/tmp/fsi-benchmarks/$(date +%Y%m%dT%H%M)-hft/bench/hft_network
+NET_DIR=$OUTDIR/bench/hft_network
 mkdir -p $NET_DIR
 
 # Start pong side (run on PONG_HOST via SSH in background)
@@ -316,3 +325,24 @@ Triggered automatically when a test misses its threshold:
 | High TCP latency vs UDP | Onload not active | Run with `onload --profile=latency`; check `onload_stackdump apps` |
 | Latency spikes at high msg rate (STAC-N1) | NIC ring buffer overflow | `ethtool -G $IFACE rx 4096 tx 4096`; check `ethtool -S $IFACE \| grep drop` |
 | Cross-core latency high (24r tests) | Threads crossing SNC boundary | Pin writer to core 0; pin readers to cores within same NUMA node |
+
+## Mandatory Reports
+
+After every HFT run, write `deep_dive_report.md` and `tuning_recommendations.md` to `$OUTDIR/`. Follow the template in [run-benchmark/SKILL.md](../run-benchmark/SKILL.md#mandatory-reports).
+
+The **Monitoring Telemetry** section of the deep dive must include:
+
+| File | Monitoring tool | Metrics |
+|---|---|---|
+| `$OUTDIR/sysconfig/cpu_info.txt` | lscpu | CPU model, ISA, LLC size |
+| `$OUTDIR/sysconfig/cpupower.txt` | cpupower | Governor, boost, HWP state |
+| `$OUTDIR/sysconfig/dimm_info.txt` | dmidecode -t 17 | DIMM population and speed |
+| `$OUTDIR/monitor/nic_baseline.txt` | ethtool -S | NIC TX/RX drop counters before test |
+| `$OUTDIR/monitor/nic_post.txt` | ethtool -S | NIC TX/RX drop counters after test (delta = drops during test) |
+| `$OUTDIR/bench/hft_compute/turbostat_hft.txt` | turbostat | Freq (MHz), PkgWatt during hft_rdtscp tests |
+| `$OUTDIR/bench/hft_compute/hft_1r1w.log` | hft_rdtscp | 1-reader 1-writer latency (ns) × 5 runs |
+| `$OUTDIR/bench/hft_compute/hft_24r1w.log` | hft_rdtscp | 24-reader 1-writer latency (ns) × 5 runs |
+| `$OUTDIR/bench/hft_compute/hft_24r3w.log` | hft_rdtscp | 24-reader 3-writer latency (ns) × 5 runs |
+| `$OUTDIR/bench/hft_network/eflatency.log` | eflatency | UDP 99th% ½RTT per payload size × 5 runs |
+| `$OUTDIR/bench/hft_network/sfnt_pingpong.log` | sfnt-pingpong | TCP 99th% ½RTT per payload size × 5 runs |
+| `$OUTDIR/bench/hft_network/stac_n1.log` | STAC-N1 | UDP latency vs throughput sweep |

@@ -9,7 +9,7 @@ allowed-tools: Bash
 # DMR Benchmark Runner
 
 **Platform:** Intel Diamond Rapids (DMR), 1S×32C×1T, 30GB RAM, CentOS Stream 10
-**Output dir:** `/tmp/benchmarks/<timestamp>/`
+**Output dir:** `${BENCHMARK_OUTDIR:-/datafs/benchmarks}/<timestamp>-<type>/` (persistent; never `/tmp/`)
 
 ## Quick Reference
 
@@ -47,6 +47,98 @@ After execution, parse and report:
 - KPI values with units
 - Delta vs GNR baseline (with sign: +X% means DMR is better for higher-is-better metrics)
 - Any platform-specific notes
+
+**Step 4 — Write mandatory output files**
+Write both `deep_dive_report.md` and `tuning_recommendations.md` to `$OUTDIR/` on the remote machine. See **Mandatory Reports** below.
+
+## Output Directory and Raw Data
+
+**All raw data and reports MUST be written to a persistent directory on the remote machine.** Never use `/tmp/` — data is lost on reboot.
+
+```bash
+# Standard OUTDIR — set BENCHMARK_OUTDIR env var to override
+OUTDIR=${BENCHMARK_OUTDIR:-/datafs/benchmarks}/$(date +%Y%m%dT%H%M)-${BENCH_TYPE:-benchmark}
+mkdir -p $OUTDIR/{bench,emon,monitor,sysconfig}
+
+# Capture sysconfig snapshot at the start of every benchmark run
+lscpu                        > $OUTDIR/sysconfig/cpu_info.txt
+numactl --hardware           > $OUTDIR/sysconfig/numa_topology.txt
+dmidecode -t 17 2>/dev/null  > $OUTDIR/sysconfig/dimm_info.txt
+cpupower frequency-info      > $OUTDIR/sysconfig/cpupower.txt 2>&1
+rdmsr -a 0x34 2>/dev/null    > $OUTDIR/sysconfig/smi_baseline.txt
+echo "Output dir: $OUTDIR"
+```
+
+**Expected output structure:**
+```
+$OUTDIR/
+├── bench/          # raw benchmark logs (turbostat, MLC, wult, benchdnn, hft_rdtscp)
+├── emon/           # perf stat .perf files — one per workload
+├── monitor/        # turbostat during-run, RAPL energy, numastat pre/post, NIC baseline
+├── sysconfig/      # cpu_info, numa_topology, dimm_info, cpupower, smi_baseline
+├── deep_dive_report.md       ← REQUIRED after every run
+└── tuning_recommendations.md ← REQUIRED after every run
+```
+
+## Mandatory Reports
+
+**`deep_dive_report.md` and `tuning_recommendations.md` are REQUIRED after every benchmark run** — individual benchmark or full suite. Generate them even when all KPIs pass (the tuning report must then state: "No misses — all KPIs passed in this run.").
+
+Write both files to `$OUTDIR/` on the remote machine using `cat > $OUTDIR/deep_dive_report.md << 'EOF'` so the data persists, not just printed to the console.
+
+### deep_dive_report.md — Required Sections
+
+1. **Platform Summary** — CPU model, socket × core × thread, NUMA topology, memory config, OS, kernel version, microcode, cpufreq governor
+2. **Preflight Status** — NUMA node count, C-state driver, governor, turbo boost state, SMI baseline count, THP setting
+3. **Monitoring Telemetry** — *(see template below)* — every monitoring tool run, its exact command, purpose, and the absolute path to its raw output file in `$OUTDIR`
+4. **Benchmark Results** — per-KPI table: metric name, measured value + units, pass threshold, PASS/FAIL/WARN, delta vs GNR reference
+5. **Key Findings** — numbered list; each finding MUST cite the raw data file it was derived from (e.g., `"IPC=1.4 from emon/BlackScholesDP_pr32.perf → memory-bound"`)
+6. **Raw Data Files Index** — table of every file written to `$OUTDIR` with one-line description
+7. **Overall Verdict** — PASS / CONDITIONAL / FAIL with one-sentence justification
+
+#### Monitoring Telemetry Section Template
+
+```markdown
+## Monitoring Telemetry
+
+### Tools Executed
+
+| Tool | Command | Purpose | Raw Output File |
+|---|---|---|---|
+| `turbostat` | `turbostat --interval 1 --show Avg_MHz,Bzy_MHz,Busy%,PkgWatt,CorWatt,CoreTmp` | CPU frequency, package power (W), core temp (°C) during run | `$OUTDIR/monitor/turbostat.txt` |
+| `perf stat -a` | `perf stat -a -e cycles,instructions,LLC-load-misses,mem_inst_retired.all_loads,cycle_activity.stalls_mem_any` | System-wide IPC, LLC miss rate, memory load rate, memory stall cycles | `$OUTDIR/emon/<workload>.perf` |
+| `RAPL` | `perf stat -a -e power/energy-pkg/,power/energy-cores/,power/energy-dram/` | Package, core, and DRAM energy (Joules) per run | `$OUTDIR/monitor/rapl.txt` |
+| `rdmsr 0x34` | `rdmsr -a 0x34` | SMI count — baseline before run and delta after | `$OUTDIR/sysconfig/smi_baseline.txt` |
+| `numastat -c` | `numastat -c` | NUMA remote page access counts — pre and post run | `$OUTDIR/monitor/numastat_pre.txt`, `$OUTDIR/monitor/numastat_post.txt` |
+| `dmidecode -t 17` | `dmidecode -t 17` | DIMM population, speed (MT/s), configured speed | `$OUTDIR/sysconfig/dimm_info.txt` |
+| `cpupower frequency-info` | `cpupower frequency-info` | CPU governor, min/max frequency, boost state | `$OUTDIR/sysconfig/cpupower.txt` |
+| `ethtool -S` | `ethtool -S <nic>` (HFT only) | NIC TX/RX drop counters — pre and post run | `$OUTDIR/monitor/nic_baseline.txt`, `$OUTDIR/monitor/nic_post.txt` |
+
+### Metrics Observed
+
+Fill in from raw data files after the run:
+
+| Metric | Value | Threshold / Expected | Status |
+|---|---|---|---|
+| IPC (system-wide) | — | 2–4 (FP workloads); >1.5 (general) | — |
+| LLC miss rate | — | <30% → compute-bound; >50% → memory-bound | — |
+| Package power peak (W) | — | ≤ TDP | — |
+| DRAM energy per run (J) | — | informational | — |
+| Frequency min/max during run | — | <5% droop from max turbo | — |
+| SMI count during test | — | 0 (hard HFT gate) | — |
+| NUMA remote hits delta | — | 0 | — |
+| Peak CoreTmp (°C) | — | <95°C | — |
+```
+
+### tuning_recommendations.md — Required Sections
+
+1. **Header** — session ID, platform summary, date
+2. **KPI Scorecard** — table: metric | measured | reference | gap | severity (Critical / High / Medium / Low / ✅ Pass)
+3. **Per-Issue Recommendations** — for each non-passing KPI: Assessment, Root Cause, Fix (bash block), Expected Improvement after fix
+4. **Priority Order** — table: priority | action | impact | effort
+5. **Combined Implementation Sequence** — Phase 1 (immediate, <5 min), Phase 2 (same session), Phase 3 (next run) — each with predicted KPI outcomes after applying that phase
+
+> If all KPIs pass: `tuning_recommendations.md` must still be generated. Set scorecard status to ✅ Pass for all rows and state "No misses — all KPIs met in this run."
 
 ## Dispatch Logic
 
