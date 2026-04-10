@@ -11,7 +11,7 @@
 | ✅ ELIGIBLE | Can run today, tools present |
 | ⚠️ PARTIAL | Some subtests runnable, others need missing tool/hardware |
 | 🔧 NEEDS INSTALL | Feasible but needs package install first |
-| ⏭️ SKIP | Explicitly deferred (FIO) or requires missing hardware |
+| ⏭️ SKIP | Requires missing hardware or infrastructure not on this system |
 | ❌ NOT ELIGIBLE | Requires hardware/software not present on this system |
 
 ---
@@ -192,12 +192,36 @@ TCP/IP bandwidth (Tx/Rx/BDir), TCP latency percentiles (P25→P99.999), RDMA (In
 **Benchmark Tool:** FIO  
 **Rationale:** Local storage is the foundational I/O primitive for all storage workload tiers  
 **Relevance:** Bounding Box  
-**Status:** ⏭️ SKIP — FIO configs deferred (user request)
+**Status:** ✅ PARTIAL — two skill versions created; file-based tests live on this system
+
+### Skill split — two separate versions
+
+> **WHY TWO SKILLS:** The spec requires raw block device access and multiple dedicated NVMe drives
+> (1×, 2×, 4×, 8×, 16×, 24×). This system has a single NVMe used as the OS boot disk with no
+> separate partition or dedicated storage device. The two skills encode these fundamentally
+> different execution environments:
+
+| Skill | Target system | Device mode | Live on this DMR | Spec subtests covered |
+|---|---|---|---|---|
+| `storage-fio-solo-dmr` | 1S solo DMR, OS boot disk only, no dedicated NVMe, no separate partition | File-based (`--filename=/path/to/file`) | ✅ Yes — tested live | 109.001–003, 109.019–021, 109.037–039 (9 subtests) |
+| `storage-fio` | Any system with a dedicated NVMe partition or separate non-OS drive(s) | Raw block (`--filename=/dev/nvmeXnY`) | ❌ Not yet — no dedicated device | Full Test 109 skeleton: 1× through 24× NVMe device scaling |
 
 ### What it stresses
 4KiB random read/write/mixed IOPS and 128KiB sequential read/write/mixed bandwidth across 1/2/4/8/16/24 NVMe devices (PCIe Gen5 and Gen6 configurations). Latency at queue depth.
 
-**This system has 1×NVMe (Gen5×4)** — only 1-device subtests (109.001–109.003 and 109.019–109.021) would map directly. Multi-device subtests require additional drives.
+**This system:** 1×NVMe (Gen5×4, OS boot disk) — file-based test only. Multi-device subtests require additional drives.
+
+### Live DMR baselines (file-based, Micron 7450, fio-3.36, `--direct=1`)
+
+| Subtest | Config | Result |
+|---|---|---|
+| 109.001 | 4K randwrite QD32, file | ~212,966 IOPS |
+| 109.002 | 4K randread QD32, file | ~339,623 IOPS |
+| 109.019 | 128K seq write QD32, file | ~1,662 MB/s |
+| 109.020 | 128K seq read QD32, file | ~2,149 MB/s |
+| — | 4K randread QD1 (latency) | ~84 µs avg |
+
+Spec targets are for raw block (e.g. 109.002 spec = 1,603,000 IOPS). File-based results are 30–85% lower due to XFS overhead and shared OS I/O.
 
 ---
 
@@ -206,7 +230,9 @@ TCP/IP bandwidth (Tx/Rx/BDir), TCP latency percentiles (P25→P99.999), RDMA (In
 **Benchmark Tool:** iperf3 + FIO  
 **Rationale:** Simultaneous stress of network and local storage — models storage server data forwarding path  
 **Relevance:** Entirely Synthetic storage server  
-**Status:** ⏭️ SKIP — missing iperf3 + FIO deferred
+**Status:** ❌ NOT ELIGIBLE on this system — requires 400GbE NIC + second machine + dedicated NVMe
+
+> When a second machine and dedicated NVMe are available, use `storage-fio` + `storage-iperf3` skills together.
 
 ### Subtests (6): Network Tx/Rx combined with 4KiB Disk Read/Write/Mixed
 
@@ -321,8 +347,8 @@ S3-compatible object storage throughput. PUT/GET concurrency sweep (4→64 threa
 | **107** (×76) | SHA2-256 / SHA2-512 sweep | openssl speed | ✅ ELIGIBLE | — |
 | **107** (×236) | SMHasher3 hashes | smhasher3 | 🔧 | Needs build from source |
 | **108** | Network (TCP/RDMA) | iperf3 / perftest | ❌ | No NIC / no 2nd machine |
-| **109** | Local Storage IOPS/BW | FIO | ⏭️ | Deferred |
-| **110–113** | Composite Net+Disk | iperf3 + FIO | ⏭️ | Deferred |
+| **109** | Local Storage IOPS/BW | FIO | ✅ PARTIAL | `storage-fio-solo-dmr` (file-based, live) · `storage-fio` (raw block skeleton) |
+| **110–113** | Composite Net+Disk | iperf3 + FIO | ❌ | No NIC + no 2nd machine |
 | **114** | NAS (ZFS+NFS/SMB) | FIO + MLPerf | ❌ | Needs OpenZFS + NIC |
 | **115** | CDN | WRK | ❌ | Needs NIC + web server |
 | **116** | Ceph SDS | WARP + FIO | ❌ | Needs Ceph cluster |
@@ -337,6 +363,7 @@ S3-compatible object storage throughput. PUT/GET concurrency sweep (4→64 threa
 ### Runnable after quick installs (`dnf install`)
 - **105 (partial)** — lz4 + pigz compression/decompression
 - **107 (full)** — SMHasher3 hashes after building from source
+- **109 (file-based)** — `storage-fio-solo-dmr`: 4K rand IOPS + 128K seq BW on OS boot NVMe (**fio-3.36 already installed**)
 
 ---
 
