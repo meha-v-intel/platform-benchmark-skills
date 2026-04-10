@@ -223,6 +223,166 @@ sudo $C2C 1000 300 -b 3 2>&1 | tee $OUT/c2c_b3.txt
 
 ---
 
+## EMON Collection — Cache Coherency PMU Events
+
+EMON runs **simultaneously** with the c2c benchmark. The tool pins its own threads, so
+system-wide (`-a`) collection captures all coherency traffic without interfering with placement.
+
+**Key PMU events for cache coherency / MESIF workload:**
+
+```
+cycles                                 # CPU cycles elapsed
+instructions                           # Instructions retired — IPC will be low (latency-bound)
+cache-misses                           # LLC misses (should be near-zero for c2c — data stays in L1/L2)
+LLC-load-misses                        # Loads that missed all cache levels (should be 0)
+cpu-migrations                         # OS thread migrations — must be 0 (c2c pins its threads)
+```
+
+Conditionally, if available on this CPU:
+
+```
+mem_load_l3_hit_retired.xsnp_hitm     # Cache line fetched from another core's Modified state (HITM)
+                                       # — directly counts MESIF M→S→I coherency hand-offs
+offcore_requests.demand_data_rd        # Off-core demand data reads (proxy for ring/mesh bus traffic)
+```
+
+> **The `xsnp_hitm` event is the diagnostic signal for c2c latency.** Each CAS operation
+> that retrieves the cache line from the remote core in Modified state = 1 HITM count.
+> On a 32-core bench1 run: HITM count ÷ elapsed seconds = hand-offs/sec → should match
+> the iteration rate derived from the measured latency.
+
+### Step 1 — Check Event Availability
+
+```bash
+perf list 2>/dev/null | grep -i "hitm\|xsnp"
+# Expected on DMR: mem_load_l3_hit_retired.xsnp_hitm
+
+perf list 2>/dev/null | grep "offcore_requests.demand_data_rd"
+```
+
+### Step 2 — Start EMON (before launching the c2c benchmark)
+
+```bash
+C2C=${WORK_DIR:-/root}/core-to-core-latency/target/release/core-to-core-latency
+OUT=${OUTPUT_DIR:-/tmp/c2c_results}
+mkdir -p $OUT/emon
+
+# Build event list
+C2C_EVENTS="cycles,instructions,cache-misses,LLC-load-misses,cpu-migrations"
+
+perf list 2>/dev/null | grep -q "xsnp_hitm" \
+    && C2C_EVENTS="${C2C_EVENTS},mem_load_l3_hit_retired.xsnp_hitm"
+
+perf list 2>/dev/null | grep -q "offcore_requests.demand_data_rd" \
+    && C2C_EVENTS="${C2C_EVENTS},offcore_requests.demand_data_rd"
+
+echo "Collecting events: ${C2C_EVENTS}"
+
+# Start EMON — system-wide, 5-second intervals, background
+nohup perf stat \
+    -e ${C2C_EVENTS} \
+    -a --interval-print 5000 \
+    -o $OUT/emon/perf_stat.txt \
+    sleep 86400 \
+    > $OUT/emon/perf.log 2>&1 &
+echo $! > $OUT/emon/perf.pid
+echo "EMON started (PID $(cat $OUT/emon/perf.pid))"
+```
+
+### Step 3 — Run the c2c Benchmark
+
+```bash
+sudo cpupower frequency-set -g performance
+sudo systemctl stop irqbalance
+
+# Full N×N run (all subtests — ~3 min)
+sudo $C2C 1000 300 2>&1 | tee $OUT/c2c_full.txt
+sudo $C2C 1000 300 --csv 2>&1 | tee $OUT/c2c_full_csv.txt
+```
+
+### Step 4 — Stop EMON (immediately after c2c finishes)
+
+```bash
+PID=$(cat $OUT/emon/perf.pid 2>/dev/null)
+[ -n "$PID" ] && kill -INT $PID && sleep 3 && echo "EMON stopped"
+echo "EMON data: $OUT/emon/perf_stat.txt"
+wc -l $OUT/emon/perf_stat.txt
+```
+
+### Alternative — Wrap c2c Directly (no background process)
+
+If you want a single aggregate over the entire run rather than per-5s intervals:
+
+```bash
+# perf stat wraps the c2c command — collects totals for the entire run
+sudo perf stat \
+    -e ${C2C_EVENTS} \
+    -a \
+    -- $C2C 1000 300 2>&1 | tee $OUT/c2c_perf_wrapped.txt
+# perf stat summary prints to stderr, c2c output to stdout — both captured by tee
+```
+
+### Step 5 — Targeted Single-Pair EMON
+
+For deep-dive on a specific problem pair (e.g. cores 23 and 8 — DMR max latency pair),
+pin perf stat to only those two CPUs:
+
+```bash
+# Run c2c on just two specific cores
+sudo $C2C 1000 1000 --cores 23,8 2>&1 | tee $OUT/c2c_pair_23_8.txt &
+C2C_PID=$!
+
+# Collect on only those two CPUs
+perf stat \
+    -e ${C2C_EVENTS} \
+    -C 23,8 \
+    --interval-print 5000 \
+    -o $OUT/emon/perf_pair_23_8.txt \
+    -- sleep 60 &
+PERF_PID=$!
+
+wait $C2C_PID
+kill $PERF_PID 2>/dev/null; wait $PERF_PID 2>/dev/null
+```
+
+This isolates the coherency event rate for that specific pair rather than averaging over all 496.
+
+### Parse EMON Results
+
+```bash
+OUT=${OUTPUT_DIR:-/tmp/c2c_results}
+
+awk '
+/cycles/                        { cyc=$1 }
+/instructions/                  { ins=$1; if (cyc>0) printf "IPC: %.3f  (expected 0.1–0.5 for latency-bound c2c)\n", ins/cyc }
+/cpu-migrations/                { printf "cpu_migrations: %s  (MUST be 0)\n", $1 }
+/cache-misses/                  { printf "cache-misses: %s\n", $1 }
+/LLC-load-misses/               { printf "LLC-load-misses: %s  (expected ~0 — data stays in L1)\n", $1 }
+/xsnp_hitm/                     { printf "HITM (coherency hand-offs): %s\n", $1 }
+/offcore_requests.demand_data/  { printf "Off-core demand reads: %s\n", $1 }
+' $OUT/emon/perf_stat.txt | head -60
+```
+
+### EMON Interpretation Table
+
+| Counter | Expected (healthy, 32C bench1 run) | FAIL / anomaly indicator |
+|---|---|---|
+| IPC | 0.1–0.5 (latency-bound stall loop) | > 2.0 → benchmark not actually stalling on coherency |
+| cpu-migrations | **0** | > 0 → OS migrated a thread mid-run; result is invalid |
+| cache-misses (L3) | Near 0 (cache line stays in L1/L2 between cores) | > 1M/s → unexpected LLC pressure from other processes |
+| LLC-load-misses | Near 0 | High → external workload polluting L3 during the run |
+| xsnp_hitm | High and proportional to iteration count | Near 0 → CAS operations not crossing cores (affinity issue) |
+| offcore_requests | Moderate — scales with NPROC × iteration rate | Flat 0 → off-core coherency not being generated |
+
+> **xsnp_hitm near 0 with IPC near 0** = the threads are stalling but **not** on cross-core
+> coherency — could mean the tool is measuring L1 hit latency (HT sibling case, expected)
+> or that thread pinning silently failed.
+>
+> **xsnp_hitm high with latency > 150 ns** = coherency storm — another workload is
+> generating competing coherency traffic on the same mesh stop. Stop other workloads and rerun.
+
+---
+
 ## Report Format
 
 ```
