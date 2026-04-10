@@ -1,6 +1,6 @@
 # Storage Skills Checklist
 **Source:** `Storage_Segment_Validation_v0.5.xlsx` › Sheet: `1 Node StorageSegment Tests`  
-**Last updated:** April 10, 2026 (rev 3 — hashing skill added; 7 skills total)  
+**Last updated:** April 10, 2026 (rev 4 — FIO skills added: storage-fio-solo-dmr + storage-fio skeleton; 9 skills total)  
 **System:** DMR 1S×32C×1T | 1×Micron 7450 NVMe (PCIe Gen5×4, 1.92TB) | 30GB RAM | CentOS Stream 10
 
 ---
@@ -171,14 +171,18 @@
 
 | Item | Status |
 |---|---|
-| **Eligibility** | ⏭️ DEFERRED (user request) |
-| **Skill file** | ❌ Not created |
-| **Doc depth** | 0% |
-| **Tested live** | ❌ No |
-| **Subtests covered** | 0 / ~52 FIO subtests + 46 composite subtests |
-| **Branch** | — |
+| **Eligibility** | ✅ PARTIAL — file-based solo-DMR tests runnable now; raw block + multi-NVMe pending |
+| **Skill file (solo-DMR)** | ✅ `storage-fio-solo-dmr/SKILL.md` (484 lines) — file-based, OS boot disk |
+| **Skill file (full)** | ✅ `storage-fio/SKILL.md` (404 lines) — raw block device + multi-NVMe skeleton |
+| **Doc depth (solo-DMR)** | ✅ ~95% — all file-based subtests + QD sweep + EMON + baselines + limitations |
+| **Doc depth (full)** | ⚠️ ~40% — skeleton with Group A/C/D commands; Groups B/E multi-device not fully fleshed out |
+| **Tested live** | ✅ Yes (solo-DMR) — 4K rand R/W, 128K seq R/W, QD1 latency measured on Micron 7450 |
+| **Subtests covered** | 9 / ~52 FIO subtests (109.001–003, 109.019–021, 109.037–039) · 0 / 46 composite |
+| **FIO installed** | ✅ fio-3.36 (`dnf install fio`) |
+| **Test file** | `/tmp/fio_test/testfile` (16 GB, on root NVMe) |
+| **Branch** | `storage-skills` |
 
-**Notes:** FIO is a `dnf install fio` away. Single-device FIO subtests (109.001–109.003, 109.019–109.021) are directly runnable. Multi-device subtests require additional NVMe drives. Composite tests (110–113) also require iperf3 + a second machine.
+**Notes:** Two-skill approach: `storage-fio-solo-dmr` for single-OS-disk systems (this DMR); `storage-fio` for proper raw block + multi-NVMe (pending hardware). File-based results are 30–85% below raw block spec targets — documented with gap factors. `storage-fio` skeleton has all subtest IDs and spec targets from the Excel; commands ready to run when dedicated NVMe is available. Composite tests 110–113 (FIO + iperf3) require a second machine and 400GbE — not yet documented.
 
 ---
 
@@ -211,10 +215,10 @@
 | 107 (SHA2) | SHA2-256 / SHA2-512 | `storage-hashing` | **100%** | ✅ Yes (26-pt sweep each) | 52 / 76 |
 | 107 (SMHasher) | SMHasher3 hashes | `storage-hashing` | **90%** | ✅ Yes (15 key hashes) | ~112 / 236 |
 | 108 | iperf3 400GbE | `storage-iperf3` | **95%** | ❌ No HW (reference) | 42 / 60 |
-| 109–113 | FIO + Composite | — | **0%** | ⏭️ Deferred | 0 / ~98 |
+| 109–113 | FIO + Composite | `storage-fio-solo-dmr` · `storage-fio` | **solo: 95% · full: 40%** | ✅ Yes (solo-DMR, 5 subtests) | 9 / ~98 |
 | 114–117 | NAS / CDN / Ceph / MinIO | — | **0%** | ❌ No infrastructure | 0 / ~302 |
 
-**Overall:** 7 skills created · ~400 / 949 subtests documented · ~360 / 949 subtests live-tested
+**Overall:** 9 skills created · ~410 / 949 subtests documented · ~370 / 949 subtests live-tested
 
 ---
 
