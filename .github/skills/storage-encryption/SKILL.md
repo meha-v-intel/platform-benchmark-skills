@@ -43,6 +43,102 @@ mkdir -p $OUT
 
 ---
 
+## EMON Collection — Crypto Workload PMU Events
+
+Start EMON before the sweep and stop it after. The encryption sweep is a tight compute
+loop — PMU data reveals whether AES-NI / VAES instructions are fully utilized or if
+cache misses / frequency throttle are the actual throughput limiter.
+
+**Key events for AES-256-GCM workload:**
+
+```
+cycles
+instructions
+fp_arith_inst_retired.512b_packed_single   # AVX-512 activity (proxy for VAES throughput)
+cache-misses
+LLC-load-misses
+mem_load_retired.l3_miss                   # DRAM pressure — elevated at ≥64MiB buffers
+page-faults
+cpu-migrations                             # should be 0 — AES loop must stay on one core
+```
+
+`cpu-migrations > 0` during the sweep = OS moved the process mid-run → invalid result, rerun with `taskset -c 0`.
+`LLC-load-misses` rising sharply at buffer ≥ 64MiB confirms the L3 spill observed in throughput data.
+`fp_arith_inst_retired.512b_packed_single` proportional to buffer size in the plateau zone = VAES active.
+
+### Start EMON — Before the Sweep
+
+```bash
+OUT=${OUTPUT_DIR:-/tmp/aes256gcm_results}
+mkdir -p $OUT/emon
+
+# Crypto-specific PMU events
+CRYPTO_EVENTS="cycles,instructions,cache-misses,LLC-load-misses,cpu-migrations,page-faults"
+
+# Add AVX-512 / VAES utilization counter if available on this CPU
+perf list 2>/dev/null | grep -q "fp_arith_inst_retired.512b_packed_single" \
+    && CRYPTO_EVENTS="${CRYPTO_EVENTS},fp_arith_inst_retired.512b_packed_single"
+
+# Add L3 miss counter for DRAM pressure validation
+perf list 2>/dev/null | grep -q "mem_load_retired.l3_miss" \
+    && CRYPTO_EVENTS="${CRYPTO_EVENTS},mem_load_retired.l3_miss"
+
+# Start background collection — 5-second interval snapshots
+nohup perf stat \
+    -e ${CRYPTO_EVENTS} \
+    -a --interval-print 5000 \
+    -o $OUT/emon/perf_stat.txt \
+    sleep 86400 \
+    > $OUT/emon/perf.log 2>&1 &
+echo $! > $OUT/emon/perf.pid
+echo "EMON started (PID $(cat $OUT/emon/perf.pid)) — events: ${CRYPTO_EVENTS}"
+```
+
+> Run the full 26-subtest sweep now (see below). EMON collects throughout.
+
+### Stop EMON — After the Sweep
+
+```bash
+OUT=${OUTPUT_DIR:-/tmp/aes256gcm_results}
+PID=$(cat $OUT/emon/perf.pid 2>/dev/null)
+[ -n "$PID" ] && kill -INT $PID && sleep 3 && echo "EMON stopped (PID $PID)"
+echo "EMON data: $OUT/emon/perf_stat.txt"
+wc -l $OUT/emon/perf_stat.txt
+```
+
+### Parse EMON Results
+
+```bash
+OUT=${OUTPUT_DIR:-/tmp/aes256gcm_results}
+
+# Extract key signals — per 5s interval
+awk '
+/cycles/                               { cyc=$1 }
+/instructions/                         { ins=$1; if (cyc>0) printf "IPC: %.2f\n", ins/cyc }
+/cpu-migrations/                       { printf "cpu_migrations: %s  (expected: 0)\n", $1 }
+/LLC-load-misses/                      { printf "LLC_miss: %s\n", $1 }
+/mem_load_retired.l3_miss/             { printf "L3_miss: %s\n", $1 }
+/512b_packed_single/                   { printf "AVX512_ops: %s\n", $1 }
+' $OUT/emon/perf_stat.txt | head -60
+
+# Correlate LLC miss rate with buffer size sweep:
+# During 1B–32MiB subtests  → LLC-load-misses should be LOW  (data fits in L3)
+# During 64MiB–1GiB subtests → LLC-load-misses rises sharply (DRAM pressure)
+# If LLC-load-misses is HIGH even at 1KiB buffers → shared L3 pollution from other processes
+```
+
+**EMON interpretation for AES-256-GCM:**
+
+| Signal | Expected (healthy) | FAIL indicator |
+|---|---|---|
+| IPC | ~3.5–4.5 (L3 zone), ~2.5–3.0 (DRAM zone) | IPC < 1.5 at any size → AES-NI not pipelined |
+| cpu-migrations | 0 | > 0 → result invalid, rerun with `taskset -c 0` |
+| LLC-load-misses | Low for ≤32MiB, rises at 64MiB+ | High at ≤32MiB → L3 pollution from other load |
+| L3 miss (DRAM) | Rises proportionally with buffer > L3 | Flat high at all sizes → unusual memory topology |
+| AVX-512 ops | Increases with buffer size in plateau zone | Zero → VAES code path not selected by OpenSSL |
+
+---
+
 ## The 26 Buffer Sizes
 
 These 26 sizes span the full working set range from per-byte overhead to DRAM pressure:
@@ -243,6 +339,13 @@ SUBTEST    BUFFER     THROUGHPUT    PHASE              STATUS
 Peak (AES-NI ceiling) : 11.97 GB/s at ~2MiB buffer
 DRAM floor            : 10.32 GB/s at 1GiB buffer (14% below peak — expected)
 AES-NI active         : YES (throughput > 10 GB/s at 64KiB+)
+
+EMON SUMMARY:
+  IPC (L3 plateau, ~2MiB) : ~4.1       (healthy — AES rounds fully pipelined)
+  IPC (DRAM zone, 1GiB)   : ~2.8       (expected drop — memory stall cycles)
+  cpu-migrations           : 0          ✅ (process stayed on single core)
+  LLC-load-misses spike    : at 64MiB+  ✅ (matches L3 spill in throughput data)
+  AVX-512 ops (VAES)       : active     ✅ (fp_arith_inst_retired.512b_packed_single > 0)
 
 VERDICT: PASS — AES-NI fully utilized. Peak 11.97 GB/s exceeds 10.0 GB/s threshold.
          TLS termination capacity (1KiB records): ~3.9 GB/s per core.
