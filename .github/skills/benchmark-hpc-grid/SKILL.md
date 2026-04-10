@@ -38,13 +38,21 @@ NUMA_NODES=$(numactl --hardware | awk '/^available:/{print $2}')
 
 echo "Cores: $CORE_COUNT | Threads: $THREAD_COUNT | NUMA nodes: $NUMA_NODES"
 
-# Set output directory
-RESULTS_DIR=/tmp/fsi-benchmarks/$(date +%Y%m%dT%H%M)-hpc/bench/hpc_workloads
-mkdir -p $RESULTS_DIR
+# Set output directory — bench and emon subdirs are BOTH required
+OUTDIR=/tmp/fsi-benchmarks/$(date +%Y%m%dT%H%M)-hpc
+RESULTS_DIR=$OUTDIR/bench/hpc_workloads
+EMON_DIR=$OUTDIR/emon
+mkdir -p $RESULTS_DIR $EMON_DIR
 
-# THP and governor
+# THP, governor, NUMA balancing
 echo always > /sys/kernel/mm/transparent_hugepage/enabled
 cpupower frequency-set -g performance
+echo 0 > /proc/sys/kernel/numa_balancing   # prevent OS page migration mid-run
+
+# Verify perf stat is available — REQUIRED before starting any workload
+perf stat -a -- sleep 0.1 2>/dev/null \
+    && echo "perf stat: OK" \
+    || { echo "ERROR: perf stat unavailable — install linux-tools-$(uname -r)"; exit 1; }
 ```
 
 ---
@@ -88,7 +96,13 @@ Run each workload under all 4 compiler × ISA combinations:
 
 ### Running the Workloads
 
-Run each workload × compiler variant under **two PR settings** per the test plan:
+Run each workload × compiler variant under **two PR settings** per the test plan.
+
+> **EMON requirement:** `perf stat -a` MUST wrap each PR=cores run block (started before
+> the first run, stopped after the last). Use `-- sleep 999 &` so it spans all 5 runs,
+> then `kill $PERF_PID` when done. Output goes to `$EMON_DIR/${WL}_pr${PR}.perf`.
+> Never use `-- sleep <N>` with a fixed duration — it will miss the workload window.
+> Never start perf inside the per-run loop — it captures only a fraction of one run.
 
 ```bash
 # For each compiler variant (loop over compilers)
@@ -106,12 +120,27 @@ for COMPILER in icx-avx2 icx-avx512 gcc-avx512; do
 
         # Run A: PR = core count (1 thread per core)
         echo "=== $WL | $COMPILER | PR=$CORE_COUNT — 5 runs ===" | tee $WL_DIR/pr_cores.log
+
+        # Start perf stat BEFORE the run loop — spans all 5 runs
+        perf stat -a \
+            -e cycles,instructions,cache-misses,cache-references,\
+LLC-load-misses,mem_inst_retired.all_loads,mem_inst_retired.all_stores,\
+cycle_activity.stalls_mem_any \
+            --interval-print 5000 \
+            -o $EMON_DIR/${WL}_pr${CORE_COUNT}.perf \
+            -- sleep 999 2>/dev/null &
+        PERF_PID=$!
+
         for run in 1 2 3 4 5; do
             PR=$CORE_COUNT numactl --physcpubind=0-$((CORE_COUNT-1)) --localalloc \
                 ./$WL 2>&1 | tail -1 | tee -a $WL_DIR/pr_cores.log
         done
 
-        # Run B: PR = thread count (SMT / 2T per core)
+        # Stop perf AFTER the run loop
+        kill $PERF_PID 2>/dev/null; wait $PERF_PID 2>/dev/null || true
+
+        # Run B: PR = thread count (SMT / 2T per core) — no separate perf needed;
+        # PR=cores run provides the key IPC/BW signal for compute vs memory classification
         echo "=== $WL | $COMPILER | PR=$THREAD_COUNT — 5 runs ===" | tee $WL_DIR/pr_threads.log
         for run in 1 2 3 4 5; do
             PR=$THREAD_COUNT numactl --physcpubind=all --localalloc \
@@ -119,6 +148,26 @@ for COMPILER in icx-avx2 icx-avx512 gcc-avx512; do
         done
     done
 done
+```
+
+### Verifying EMON Coverage
+
+After the run, confirm all workloads have perf output before reporting:
+
+```bash
+# Every workload should have a non-empty .perf file
+MISSING=0
+for WL in mc_asian_bump_greeks mc_asian_aad_greeks asian-opt binomial \
+           BlackScholesDP bs_pde_solver bs_pde_2D_solver forward_curve_bootstrap \
+           heston_impllied_vol heston_price implied_vol liborSwaptionGreeks \
+           amc emc spline_forward_mkl zero_curve_spline; do
+    PERF_FILE=$EMON_DIR/${WL}_pr${CORE_COUNT}.perf
+    if [ ! -s "$PERF_FILE" ]; then
+        echo "WARN: missing or empty EMON for $WL — $PERF_FILE"
+        MISSING=$((MISSING+1))
+    fi
+done
+[ $MISSING -eq 0 ] && echo "EMON: all workloads covered" || echo "EMON: $MISSING workloads missing telemetry"
 ```
 
 ### Parsing Results
