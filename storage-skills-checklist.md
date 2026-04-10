@@ -208,13 +208,13 @@
 | 105 | Compression (lz4/zlib/zstd) | `storage-compression` | **100%** | ✅ Yes (all groups) | 51 / 51 |
 | 105 (minLZ) | Compression (Intel minLZ) | — | **0%** | ❌ Internal tool | 0 / ? |
 | 106 | Erasure Coding (RS) | `storage-erasure-coding` | **100%** | ✅ Yes (all configs) | 21 (2 spec + 19 extended) |
-| 107 (SHA2) | SHA2-256 / SHA2-512 | — | **0%** | ❌ Not yet | 0 / 76 |
-| 107 (SMHasher) | SMHasher3 hashes | — | **0%** | ❌ Not built | 0 / 236 |
+| 107 (SHA2) | SHA2-256 / SHA2-512 | `storage-hashing` | **100%** | ✅ Yes (26-pt sweep each) | 52 / 76 |
+| 107 (SMHasher) | SMHasher3 hashes | `storage-hashing` | **90%** | ✅ Yes (15 key hashes) | ~112 / 236 |
 | 108 | iperf3 400GbE | `storage-iperf3` | **95%** | ❌ No HW (reference) | 42 / 60 |
 | 109–113 | FIO + Composite | — | **0%** | ⏭️ Deferred | 0 / ~98 |
 | 114–117 | NAS / CDN / Ceph / MinIO | — | **0%** | ❌ No infrastructure | 0 / ~302 |
 
-**Overall:** 6 skills created · 236 / 949 subtests documented · 194 / 949 subtests live-tested
+**Overall:** 7 skills created · ~400 / 949 subtests documented · ~360 / 949 subtests live-tested
 
 ---
 
@@ -222,11 +222,11 @@
 
 | Priority | Action | Effort | Subtests unlocked |
 |---|---|---|---|
-| 1 | Create `storage-hashing` skill (SHA2-256 + SHA2-512) | ~1 hr — OpenSSL ready | 76 |
-| 2 | Build SMHasher3 → extend `storage-hashing` | ~3 hrs (cmake build) | +236 |
-| 3 | Fix SPEC ISO → install → run → create `storage-speccpu` skill | ~2 hrs (copy + rename + install) | 4 |
-| 4 | Add EMON section to `storage-c2c` | ~30 min | — |
-| 5 | FIO skill (when deferred status lifted) | ~2 hrs | ~98 |
+| 1 | Fix SPEC ISO → install → run → create `storage-speccpu` skill | ~2 hrs (copy + rename + install) | 4 |
+| 2 | Add EMON section to `storage-c2c` | ~30 min | — |
+| 3 | FIO skill (when deferred status lifted) | ~2 hrs | ~98 |
+| ✅ | ~~Create `storage-hashing` skill (SHA2-256 + SHA2-512)~~ | Done | 52 |
+| ✅ | ~~Build SMHasher3 → extend `storage-hashing`~~ | Done | ~112 |
 | ✅ | ~~`dnf install lz4 pigz` → `storage-compression` skill~~ | Done | 51 |
 | ✅ | ~~Build ISA-L + `storage-erasure-coding` skill~~ | Done | 21 |
 | ✅ | ~~Add EMON to `storage-encryption`~~ | Done | — |
