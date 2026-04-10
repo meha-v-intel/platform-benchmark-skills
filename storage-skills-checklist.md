@@ -1,6 +1,6 @@
 # Storage Skills Checklist
 **Source:** `Storage_Segment_Validation_v0.5.xlsx` › Sheet: `1 Node StorageSegment Tests`  
-**Last updated:** April 10, 2026  
+**Last updated:** April 10, 2026 (rev 2 — compression + erasure coding skills added)  
 **System:** DMR 1S×32C×1T | 1×Micron 7450 NVMe (PCIe Gen5×4, 1.92TB) | 30GB RAM | CentOS Stream 10
 
 ---
@@ -76,17 +76,17 @@
 | Item | Status |
 |---|---|
 | **Eligibility** | ⚠️ PARTIAL (SW AES-NI: ✅ · QAT hardware: ❌) |
-| **Skill file** | ✅ `storage-encryption/SKILL.md` (270 lines) |
+| **Skill file** | ✅ `storage-encryption/SKILL.md` (373 lines) |
 | **Doc depth** | ✅ Thorough — 100% for SW subtests · 0% for QAT (no hardware) |
 | **Tested live** | ✅ Yes — all 26 SW buffer sizes measured on this DMR system |
 | **Subtests covered** | 26 / 52 (SW only; QAT 26 excluded — no hardware) |
 | **Baselines in skill** | ✅ All 26 DMR values: peak 11.97 GB/s at ~2MiB, DRAM floor 10.32 GB/s at 1GiB |
-| **EMON integration** | ⚠️ Not yet — no EMON section in this skill |
+| **EMON integration** | ✅ Full — crypto PMU event set: cycles, instructions, LLC-load-misses, fp_arith_inst_retired.512b_packed_single (VAES proxy), mem_load_retired.l3_miss |
 | **Pass/fail thresholds** | ✅ Per-zone thresholds defined |
 | **Parse formula** | ✅ Validated: `grep "^+F:" | awk -F: '{printf "%.2f GB/s", $4/1000000000}'` |
 | **Branch** | `storage-skills` |
 
-**Notes:** QAT subtests are documented as out-of-scope with a clear note about why. EMON section could be added (relevant PMU events: `cache-misses`, `instructions`, `avx512` utilization).
+**Notes:** QAT subtests are documented as out-of-scope with a clear note about why. EMON section added (commit `4ddb0de`) — crypto-specific PMU events, start/stop wrapper, IPC interpretation table.
 
 ---
 
@@ -94,15 +94,19 @@
 
 | Item | Status |
 |---|---|
-| **Eligibility** | 🔧 NEEDS INSTALL (`dnf install lz4 pigz`) |
-| **Skill file** | ❌ Not created |
-| **Doc depth** | 0% |
-| **Tested live** | ❌ No |
-| **Subtests covered** | 0 / 23 |
-| **Blockers** | `lz4` CLI not installed (only `lz4-libs`); `pigz` not installed; `minLZ` Intel-internal (not public) |
-| **Branch** | — |
+| **Eligibility** | ✅ ELIGIBLE (lz4, zlib/pigz, zstd) · ⚠️ PARTIAL (minLZ Intel-internal blocked) |
+| **Skill file** | ✅ `storage-compression/SKILL.md` (683 lines) |
+| **Doc depth** | ✅ Thorough — 100% for public codecs · 0% for minLZ |
+| **Tested live** | ✅ Yes — all live-measured on DMR this session |
+| **Subtests covered** | 51 runnable / 51 (lz4 + zlib + zstd) + 0 / ? (minLZ blocked) |
+| **Groups documented** | A: lz4 levels 1–9 × 3 corpora (18 subtests) · B: pigz/zlib levels 1/6/9 × threads 1–NPROC (15 subtests) · C: zstd levels 1–9 × corpora (18 subtests) |
+| **Baselines in skill** | ✅ lz4 l1 text: 408 MB/s compress / 3,609 MB/s decompress · pigz l1 p32: 3,350 MB/s · zstd l3: 227 MB/s compress / 1,249 MB/s decompress |
+| **EMON integration** | ✅ Full — IPC, LLC miss %, AVX-512 vectorisation proxy, cpu-migrations |
+| **minLZ note** | ✅ Prerequisite note added: minLZ subtests require Intel-internal tool build |
+| **Pass/fail thresholds** | ✅ Per-codec thresholds at 65–75% of measured baselines |
+| **Branch** | `storage-skills` (commit `e5fa7ea`) |
 
-**Notes:** `zstd` is already present. The lz4 and pigz/zlib subtests are a 2-minute install away. minLZ subtests (Intel-internal) cannot be run. Skill creation feasible for lz4 + zlib subtests — estimated ~16 runnable subtests out of 23.
+**Notes:** `lz4` v1.9.4 and `pigz` v2.8 installed via `dnf` this session. `zstd` v1.5.5 and `zlib-ng` 1.3.1 were already present. All three codecs benchmarked live. minLZ is excluded with a callout note in Prerequisites.
 
 ---
 
@@ -110,15 +114,19 @@
 
 | Item | Status |
 |---|---|
-| **Eligibility** | ❌ NOT ELIGIBLE |
-| **Skill file** | ❌ Not created |
-| **Doc depth** | 0% |
-| **Tested live** | ❌ No |
-| **Subtests covered** | 0 / 2 |
-| **Blocker** | Requires Intel ISA-L library + benchmark harness; neither installed |
-| **Branch** | — |
+| **Eligibility** | ✅ ELIGIBLE — ISA-L built and installed from source |
+| **Skill file** | ✅ `storage-erasure-coding/SKILL.md` (499 lines) |
+| **Doc depth** | ✅ Thorough — 100% |
+| **Tested live** | ✅ Yes — all configs measured on DMR this session |
+| **Subtests covered** | 21 / 2 spec subtests + extended sweep |
+| **Groups documented** | A: RS 10+4 primary (6 subtests) · B: Config sweep 4+2/8+3/10+4/12+4 (8 subtests) · C: Buffer size sweep 64K–16M (6 subtests) · D: GF-256 multiply primitive (1 subtest) |
+| **Baselines in skill** | ✅ RS 10+4 encode 35,599 MB/s · decode 51,592 MB/s · GF mul 26,573 MB/s — all AVX-512 GFNI |
+| **EMON integration** | ✅ Full — IPC, LLC miss %, AVX-512 GFNI ops, cpu-migrations |
+| **Pass/fail thresholds** | ✅ Per-subtest thresholds at 70% of measured baselines |
+| **Branch** | `storage-skills` (commit `9a79567`) |
+| **ISA-L version** | v2.x (git clone `intel/isa-l`, built with nasm/yasm, AVX-512 GFNI dispatch confirmed) |
 
-**Notes:** ISA-L is open source ([intel/isa-l](https://github.com/intel/isa-l)) — buildable from source. The benchmark harness that drives Reed-Solomon encode/decode at the spec's exact parameters is unknown/unspecified. Skill creation would require identifying + building the harness.
+**Notes:** ISA-L cloned and built this session (`./autogen.sh && ./configure && make -j32 && make install`). `erasure_code_perf` and `gf_vect_mul_perf` binaries built separately (`make erasure_code/erasure_code_perf`). Build instructions fully documented in skill Prerequisites. Binary at `/root/isa-l/erasure_code/erasure_code_perf`.
 
 ---
 
@@ -195,15 +203,16 @@
 | 103 | SpecCPU 2017 | — | **0%** | ❌ Blocked | 0 / 4 |
 | 104 (SW) | AES-256-GCM | `storage-encryption` | **100%** | ✅ Yes (all 26) | 26 / 26 |
 | 104 (QAT) | AES-256-GCM QAT | — | **0%** | ❌ No HW | 0 / 26 |
-| 105 | Compression | — | **0%** | ❌ Not installed | 0 / 23 |
-| 106 | Erasure Coding | — | **0%** | ❌ Not installed | 0 / 2 |
+| 105 | Compression (lz4/zlib/zstd) | `storage-compression` | **100%** | ✅ Yes (all groups) | 51 / 51 |
+| 105 (minLZ) | Compression (Intel minLZ) | — | **0%** | ❌ Internal tool | 0 / ? |
+| 106 | Erasure Coding (RS) | `storage-erasure-coding` | **100%** | ✅ Yes (all configs) | 21 (2 spec + 19 extended) |
 | 107 (SHA2) | SHA2-256 / SHA2-512 | — | **0%** | ❌ Not yet | 0 / 76 |
 | 107 (SMHasher) | SMHasher3 hashes | — | **0%** | ❌ Not built | 0 / 236 |
 | 108 | iperf3 400GbE | `storage-iperf3` | **95%** | ❌ No HW (reference) | 42 / 60 |
 | 109–113 | FIO + Composite | — | **0%** | ⏭️ Deferred | 0 / ~98 |
 | 114–117 | NAS / CDN / Ceph / MinIO | — | **0%** | ❌ No infrastructure | 0 / ~302 |
 
-**Overall:** 4 skills created · 164 / 949 subtests documented · 122 / 949 subtests live-tested
+**Overall:** 6 skills created · 236 / 949 subtests documented · 194 / 949 subtests live-tested
 
 ---
 
@@ -211,10 +220,11 @@
 
 | Priority | Action | Effort | Subtests unlocked |
 |---|---|---|---|
-| 1 | Create `storage-hashing` skill (SHA2) | ~1 hr — OpenSSL ready | 76 |
-| 2 | `dnf install lz4 pigz` → create `storage-compression` skill | ~2 hrs | ~16 |
-| 3 | Build SMHasher3 → extend `storage-hashing` | ~3 hrs (cmake build) | +236 |
-| 4 | Fix SPEC ISO → install → run → create `storage-speccpu` skill | ~2 hrs (copy + rename + install) | 4 |
-| 5 | Add EMON section to `storage-encryption` and `storage-c2c` | ~1 hr | — |
-| 6 | Build ISA-L + identify harness → create `storage-erasure` skill | Unknown (harness unspecified) | 2 |
-| 7 | FIO skill (when deferred status lifted) | ~2 hrs | ~98 |
+| 1 | Create `storage-hashing` skill (SHA2-256 + SHA2-512) | ~1 hr — OpenSSL ready | 76 |
+| 2 | Build SMHasher3 → extend `storage-hashing` | ~3 hrs (cmake build) | +236 |
+| 3 | Fix SPEC ISO → install → run → create `storage-speccpu` skill | ~2 hrs (copy + rename + install) | 4 |
+| 4 | Add EMON section to `storage-c2c` | ~30 min | — |
+| 5 | FIO skill (when deferred status lifted) | ~2 hrs | ~98 |
+| ✅ | ~~`dnf install lz4 pigz` → `storage-compression` skill~~ | Done | 51 |
+| ✅ | ~~Build ISA-L + `storage-erasure-coding` skill~~ | Done | 21 |
+| ✅ | ~~Add EMON to `storage-encryption`~~ | Done | — |
