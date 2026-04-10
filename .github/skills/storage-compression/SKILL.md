@@ -57,6 +57,13 @@ python3 -c "import zlib; print('zlib version:', zlib.ZLIB_VERSION)"
 mkdir -p ${CORPUS_DIR} ${SESSION_DIR}
 ```
 
+> **minLZ subtests (Intel-internal):** Any subtests involving the minLZ codec can only be
+> run after the Intel-internal minLZ tool has been built and installed on the target system.
+> minLZ is not available via `dnf` or any public package manager. Obtain the source from the
+> Intel-internal repository, build per its README, and confirm `minlz` (or equivalent binary)
+> is on `$PATH` before attempting those subtests. All Groups A–C in this skill use only
+> publicly available tools (lz4, pigz, zstd) and are unaffected by minLZ availability.
+
 ---
 
 ## EMON Collection — Compression Workload PMU Events
