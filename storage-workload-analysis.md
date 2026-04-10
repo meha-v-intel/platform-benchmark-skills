@@ -322,10 +322,46 @@ Ceph RGW (S3 object): PUT/GET concurrency sweep at 1KiB–4MiB object sizes. Cep
 **App:** MinIO  
 **Rationale:** Not specified  
 **Relevance:** Not specified  
-**Status:** ❌ NOT ELIGIBLE — requires MinIO server + WARP client + MLPerf Storage framework
+**Status:** ✅ PARTIAL — 112 WARP subtests runnable; 2 MLPerf subtests ❌ NOT ELIGIBLE (no cluster)
 
 ### What it stresses
-S3-compatible object storage throughput. PUT/GET concurrency sweep (4→64 threads) at 1KiB through 4MiB objects. Also includes MLPerf Storage training I/O profile (models AI training data ingestion from object store).
+S3-compatible object storage throughput. PUT/GET concurrency sweep (4→256) at 1KiB through 64MiB objects. Also includes MLPerf Storage training I/O profile (models AI training data ingestion from object store).
+
+### Skill split
+
+| Subtests | Skill | Status | Notes |
+|---|---|---|---|
+| 117.001–117.112 (WARP sweep) | `storage-minio` | ✅ RUNNABLE | MinIO + WARP built from source; single-node loopback |
+| 117.113 (MLPerf Training) | — | ❌ NOT ELIGIBLE | Needs distributed MinIO cluster + GPU + mlperf_storage |
+| 117.114 (MLPerf Inference) | — | ❌ NOT ELIGIBLE | Needs distributed MinIO cluster + GPU + mlperf_storage |
+
+### Installation (already done on this DMR)
+```bash
+# Go 1.26.1
+dnf install -y golang
+# MinIO server
+go install github.com/minio/minio@latest   # ~/go/bin/minio
+# WARP benchmark client
+go install github.com/minio/warp@latest    # ~/go/bin/warp
+# Start MinIO
+export MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin
+nohup ~/go/bin/minio server /data/minio --address :9000 > /tmp/minio.log 2>&1 &
+```
+
+### DMR live baselines (single-node, loopback, Micron 7450 Gen5×4)
+
+| Object size | Op | C | Throughput | Obj/s | Avg latency |
+|---|---|---|---|---|---|
+| 1 KiB | PUT | 4 | 1.80 MiB/s | 1,848 | 2.2 ms |
+| 1 KiB | PUT | 32 | 3.02 MiB/s | 3,092 | 10.5 ms |
+| 1 KiB | GET | 4 | 6.05 MiB/s | 6,196 | 0.6 ms |
+| 1 KiB | GET | 32 | 42.87 MiB/s | 43,899 | 0.7 ms |
+| 1 MiB | PUT | 32 | 1,064 MiB/s | 1,064 | 30.1 ms |
+| 1 MiB | GET | 32 | 8,067 MiB/s | 8,067 | 4.0 ms |
+| 64 MiB | PUT | 4 | 1,102 MiB/s | 17 | 232 ms |
+| 64 MiB | GET | 4 | 8,370 MiB/s | 131 | 30.6 ms |
+
+*PUT limited by NVMe write (~1.1 GB/s); GET served from 30 GiB page cache (~8 GiB/s).*
 
 ### Subtests (114): PUT/GET/Mixed concurrency sweep, MLPerf Storage checkpoints, TF_ObjectStorage patterns
 
@@ -352,7 +388,7 @@ S3-compatible object storage throughput. PUT/GET concurrency sweep (4→64 threa
 | **114** | NAS (ZFS+NFS/SMB) | FIO + MLPerf | ❌ | Needs OpenZFS + NIC |
 | **115** | CDN | WRK | ❌ | Needs NIC + web server |
 | **116** | Ceph SDS | WARP + FIO | ❌ | Needs Ceph cluster |
-| **117** | MinIO SDS | WARP + MLPerf | ❌ | Needs MinIO + WARP |
+| **117** | MinIO SDS | WARP + MLPerf | ✅ PARTIAL | `storage-minio` (WARP 112/114 done) · MLPerf 2 subtests ❌ no cluster |
 
 ### Immediately runnable today (0 installs needed)
 - **101** — MLC (memory latency/BW/lat-BW curve)
@@ -364,6 +400,7 @@ S3-compatible object storage throughput. PUT/GET concurrency sweep (4→64 threa
 - **105 (partial)** — lz4 + pigz compression/decompression
 - **107 (full)** — SMHasher3 hashes after building from source
 - **109 (file-based)** — `storage-fio-solo-dmr`: 4K rand IOPS + 128K seq BW on OS boot NVMe (**fio-3.36 already installed**)
+- **117 (WARP sweep)** — `storage-minio`: MinIO + WARP already built (`~/go/bin/minio`, `~/go/bin/warp`); MinIO server running at localhost:9000
 
 ---
 

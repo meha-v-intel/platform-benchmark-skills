@@ -1,6 +1,6 @@
 # Storage Skills Checklist
 **Source:** `Storage_Segment_Validation_v0.5.xlsx` › Sheet: `1 Node StorageSegment Tests`  
-**Last updated:** April 10, 2026 (rev 4 — FIO skills added: storage-fio-solo-dmr + storage-fio skeleton; 9 skills total)  
+**Last updated:** April 10, 2026 (rev 5 — storage-minio added: MinIO + WARP benchmark skill for Test 117; 10 skills total)  
 **System:** DMR 1S×32C×1T | 1×Micron 7450 NVMe (PCIe Gen5×4, 1.92TB) | 30GB RAM | CentOS Stream 10
 
 ---
@@ -186,7 +186,7 @@
 
 ---
 
-## Tests 114–117 — System-Level (NAS / CDN / Ceph / MinIO)
+## Tests 114–116 — System-Level (NAS / CDN / Ceph)
 
 | Item | Status |
 |---|---|
@@ -194,9 +194,41 @@
 | **Skill files** | ❌ None created |
 | **Doc depth** | 0% |
 | **Tested live** | ❌ No |
-| **Subtests covered** | 0 / ~302 total |
-| **Blockers** | Requires full stack: OpenZFS, NFS/SMB, nginx, Ceph cluster, MinIO cluster, WRK, WARP, MLPerf Storage — none installed |
+| **Subtests covered** | 0 / ~188 total |
+| **Blockers** | Requires full stack: OpenZFS, NFS/SMB, nginx, Ceph cluster, WRK — none installed |
 | **Branch** | — |
+
+---
+
+## Test 117 — Software Defined Storage: NonProd MinIO
+
+| Item | Status |
+|---|---|
+| **Eligibility** | ✅ PARTIAL — 112 WARP subtests runnable; 2 MLPerf subtests not eligible |
+| **Skill file** | ✅ `storage-minio/SKILL.md` |
+| **Doc depth** | ✅ ~95% — all 8 object sizes × 2 ops × 7 concurrencies + DMR baselines + interpretation + cleanup |
+| **Tested live** | ✅ Yes — PUT + GET baselines measured: 1KiB C4/C32, 1MiB C32, 64MiB C4/C4 |
+| **Subtests covered** | 112 / 114 (117.001–117.112 WARP; 117.113–117.114 MLPerf: ❌ NOT ELIGIBLE) |
+| **Tool: MinIO** | ✅ Built from source — `go install github.com/minio/minio@latest` → `~/go/bin/minio` |
+| **Tool: WARP** | ✅ Built from source — `go install github.com/minio/warp@latest` → `~/go/bin/warp` |
+| **Go version** | ✅ Go 1.26.1 (Red Hat, `dnf install golang`) |
+| **MinIO deployment** | Single-node, single-drive `/data/minio`, port 9000, loopback |
+| **Branch** | `storage-skills` |
+
+**Notes:** `minio/minio` GitHub repo was archived Feb 2026 — source-only distribution now.
+Build takes ~2–3 min per binary (MinIO 150MB, WARP 20MB).
+MLPerf subtests 117.113–117.114 require distributed MinIO cluster + GPU training workload — not eligible on solo single-socket DMR.
+Single-node bottlenecks: PUT limited by NVMe write (~1,100 MiB/s for large objects, ~3,100 obj/s for 1KiB); GET served from page cache (~8 GiB/s for large, ~44K obj/s for 1KiB at C32).
+
+**DMR live baselines:**
+- 1KiB PUT C4 = 1,848 obj/s, 1.80 MiB/s, 2.2ms avg
+- 1KiB PUT C32 = 3,092 obj/s, 3.02 MiB/s, 10.5ms avg (saturated)
+- 1KiB GET C4 = 6,196 obj/s, 6.05 MiB/s, 0.6ms avg  
+- 1KiB GET C32 = 43,899 obj/s, 42.87 MiB/s, 0.7ms avg (page cache)
+- 1MiB PUT C32 = 1,064 MiB/s, 30.1ms avg (NVMe write bound)
+- 1MiB GET C32 = 8,067 MiB/s, 4.0ms avg (RAM bound)
+- 64MiB PUT C4 = 1,102 MiB/s, 17 obj/s, 232ms avg
+- 64MiB GET C4 = 8,370 MiB/s, 131 obj/s, 30.6ms avg
 
 ---
 
@@ -216,9 +248,11 @@
 | 107 (SMHasher) | SMHasher3 hashes | `storage-hashing` | **90%** | ✅ Yes (15 key hashes) | ~112 / 236 |
 | 108 | iperf3 400GbE | `storage-iperf3` | **95%** | ❌ No HW (reference) | 42 / 60 |
 | 109–113 | FIO + Composite | `storage-fio-solo-dmr` · `storage-fio` | **solo: 95% · full: 40%** | ✅ Yes (solo-DMR, 5 subtests) | 9 / ~98 |
-| 114–117 | NAS / CDN / Ceph / MinIO | — | **0%** | ❌ No infrastructure | 0 / ~302 |
+| 114–116 | NAS / CDN / Ceph | — | **0%** | ❌ No infrastructure | 0 / ~188 |
+| 117 (WARP) | MinIO Put/Get sweep | `storage-minio` | **95%** | ✅ Yes (8 key baselines) | 112 / 114 |
+| 117 (MLPerf) | MLPerf TF_ObjectStorage | — | **0%** | ❌ No cluster/GPU | 0 / 2 |
 
-**Overall:** 9 skills created · ~410 / 949 subtests documented · ~370 / 949 subtests live-tested
+**Overall:** 10 skills created · ~522 / 949 subtests documented · ~382 / 949 subtests live-tested
 
 ---
 
@@ -228,6 +262,7 @@
 |---|---|---|---|
 | 1 | Fix SPEC ISO → install → run → create `storage-speccpu` skill | ~2 hrs (copy + rename + install) | 4 |
 | 2 | FIO skill (when deferred status lifted) | ~2 hrs | ~98 |
+| ✅ | ~~Create `storage-minio` skill (MinIO + WARP, Test 117)~~ | Done | 112 |
 | ✅ | ~~Add EMON section to `storage-c2c`~~ | Done | — |
 | ✅ | ~~Create `storage-hashing` skill (SHA2-256 + SHA2-512)~~ | Done | 52 |
 | ✅ | ~~Build SMHasher3 → extend `storage-hashing`~~ | Done | ~112 |
