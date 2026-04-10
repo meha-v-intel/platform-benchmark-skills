@@ -40,18 +40,18 @@
 | Item | Status |
 |---|---|
 | **Eligibility** | ✅ ELIGIBLE |
-| **Skill file** | ✅ `storage-c2c/SKILL.md` (260 lines) |
-| **Doc depth** | ✅ Thorough — 90% |
+| **Skill file** | ✅ `storage-c2c/SKILL.md` (420 lines) |
+| **Doc depth** | ✅ Thorough — 100% |
 | **Tested live** | ✅ Yes — full 32×32 matrix run; all 4 subtests measured |
 | **Subtests covered** | 4 / 4 |
 | **Groups documented** | Min latency · Max latency · Mean latency · 32×32 matrix heatmap |
 | **Baselines in skill** | ✅ Min 19.7 ns (HT siblings), Max 115.4 ns (distant mesh), Mean 91.8 ns, full matrix |
-| **EMON integration** | ⚠️ Partial — perf stat wrapper noted but not a full EMON section |
+| **EMON integration** | ✅ Full — coherency PMU events: cycles, instructions, cache-misses, LLC-load-misses, cpu-migrations, xsnp_hitm (MESIF hand-off counter), offcore_requests; start/stop wrapper + single-pair targeted variant |
 | **Pass/fail thresholds** | ✅ Per-subtest thresholds defined |
-| **Branch** | `storage-skills` |
+| **Branch** | `storage-skills` (commit `e9b138f`) |
 | **Build instructions** | ✅ Rust/cargo install + `cargo build --release` documented |
 
-**Notes:** 10% gap = no dedicated EMON event set for C2C workload type (coherency PMU events not yet defined). Binary was not pre-installed — built from source during this session (`dnf install rust cargo` + git clone).
+**Notes:** EMON section added (commit `e9b138f`) — 5-step simultaneous collection workflow, `xsnp_hitm` as diagnostic signal for MESIF coherency hand-offs, targeted single-pair perf stat variant (`-C N,M`), interpretation table. Binary was not pre-installed — built from source (`dnf install rust cargo` + git clone).
 
 ---
 
@@ -201,7 +201,7 @@
 | Test | Workload | Skill | Doc % | Tested Live | Subtests |
 |---|---|---|---|---|---|
 | 101 | MLC Memory | `storage-mlc` | **100%** | ✅ Yes (Groups A + D) | 92 / 92 |
-| 102 | Core-to-Core Latency | `storage-c2c` | **90%** | ✅ Yes (full matrix) | 4 / 4 |
+| 102 | Core-to-Core Latency | `storage-c2c` | **100%** | ✅ Yes (full matrix) | 4 / 4 |
 | 103 | SpecCPU 2017 | — | **0%** | ❌ Blocked | 0 / 4 |
 | 104 (SW) | AES-256-GCM | `storage-encryption` | **100%** | ✅ Yes (all 26) | 26 / 26 |
 | 104 (QAT) | AES-256-GCM QAT | — | **0%** | ❌ No HW | 0 / 26 |
@@ -223,8 +223,8 @@
 | Priority | Action | Effort | Subtests unlocked |
 |---|---|---|---|
 | 1 | Fix SPEC ISO → install → run → create `storage-speccpu` skill | ~2 hrs (copy + rename + install) | 4 |
-| 2 | Add EMON section to `storage-c2c` | ~30 min | — |
-| 3 | FIO skill (when deferred status lifted) | ~2 hrs | ~98 |
+| 2 | FIO skill (when deferred status lifted) | ~2 hrs | ~98 |
+| ✅ | ~~Add EMON section to `storage-c2c`~~ | Done | — |
 | ✅ | ~~Create `storage-hashing` skill (SHA2-256 + SHA2-512)~~ | Done | 52 |
 | ✅ | ~~Build SMHasher3 → extend `storage-hashing`~~ | Done | ~112 |
 | ✅ | ~~`dnf install lz4 pigz` → `storage-compression` skill~~ | Done | 51 |
