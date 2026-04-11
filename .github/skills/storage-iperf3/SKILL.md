@@ -50,6 +50,113 @@ Set all variables before invoking this skill.
 
 ---
 
+## Step 0 — Gather System Info Before Starting
+
+Before touching any benchmark command, collect this info from the user or discover it
+yourself. Many hours of debugging stem from skipping this step.
+
+### 1. Interface topology
+```bash
+# On each system — discover interface names, IPs, speeds, PCIe address
+ip -br addr show | grep -v "^lo"
+# expect: eth1, eth2... with 192.168.x.x/24 IPs and state UP
+
+# Confirm NIC speed (must be 400000Mb/s for CX7/CX8 400GbE)
+for iface in eth1 eth2 eth3 eth4; do
+    echo -n "$iface: "; ethtool $iface 2>/dev/null | grep -E "Speed|Link detected"
+done
+
+# Map interface → PCIe slot (needed for NUMA affinity and crash triage)
+for iface in eth1 eth2 eth3 eth4; do
+    pci=$(ethtool -i $iface 2>/dev/null | grep "bus-info" | awk '{print $2}')
+    echo "$iface → $pci"
+done
+```
+
+On a **2-NIC system** (e.g. DMR-Q9UC with 2× CX8), expect **two separate PCI domains**:
+- CX8 #1: `0000:61:00.0` → eth1, `0000:61:00.1` → eth2
+- CX8 #2: `0001:11:00.0` → eth3, `0001:11:00.1` → eth4
+
+Each NIC has two ports sharing one PCIe slot — running both ports simultaneously splits
+the PCIe bandwidth between them. This is **critical for interpreting results**.
+
+### 2. PCIe link speed — verify before every session
+```bash
+# On System A — check both NIC slots
+for dev in $(lspci | grep -i mellanox | awk '{print $1}' | grep "00\.0$"); do
+    echo -n "$dev: "; lspci -s $dev -vv 2>/dev/null | grep "LnkSta:"
+done
+# Expected: Speed 32GT/s (Gen5) or 64GT/s (Gen6), Width x16, no "(downgraded)"
+# If you see: Speed 2.5GT/s (Gen1) or 8GT/s (Gen3) → STOP, see PCIe Recovery below
+```
+
+> **A PCIe speed downgrade silently kills results.** Gen1 (2.5GT/s ×16) = 32 Gbps
+> shared across both ports → ~28 Gbps max per port instead of 400 Gbps. This looks
+> like a low-bandwidth NIC, not a config error. Always check LnkSta first.
+
+### 3. Check for competing workloads
+```bash
+# On both systems before starting — stale iperf3 processes from prior sessions
+# can consume 25–50% CPU each and distort results
+ssh $SERVER_HOST 'pgrep -a iperf3'
+ssh $CLIENT_HOST 'pgrep -a iperf3'
+# Kill if found:
+ssh $SERVER_HOST 'pkill -x iperf3'; ssh $CLIENT_HOST 'pkill -x iperf3'
+
+# Check load average
+ssh $SERVER_HOST 'uptime'; ssh $CLIENT_HOST 'uptime'
+# If load > 5.0 on a 160c system, investigate before benchmarking
+```
+
+### 4. System-specific tuning scripts
+Some systems ship with pre-tuned scripts that are **required** to reach line rate.
+Always check and apply them before running:
+```bash
+ssh $SERVER_HOST 'ls /root/knobs/ /root/set_aff_perf.sh 2>/dev/null'
+# Common files on Intel DMR validation systems:
+#   /root/knobs/tune_nic.sh          — ring buffers, queues, interrupt coalescing
+#   /root/knobs/sysctl.conf.tuned    — network sysctls (tuned-adm profile format)
+#   /root/set_aff_perf.sh            — IRQ affinity + performance CPU governor
+#   /root/set_irq_affinity_cpulist.sh — per-interface IRQ → CPU core mapping
+
+# Apply on both systems if present:
+for h in $SERVER_HOST $CLIENT_HOST; do
+    ssh $h 'bash /root/knobs/tune_nic.sh 2>/dev/null'
+    ssh $h 'sysctl -p /root/knobs/sysctl.conf.tuned 2>/dev/null'
+    ssh $h 'bash /root/set_aff_perf.sh 2>/dev/null'
+done
+```
+
+> **Key tuning parameters for CX8 at 400GbE:**
+> - `ethtool -L $iface combined 63` — 63 combined RX/TX queues (Mellanox CX8 max)
+> - `ethtool -G $iface rx 8192 tx 8192` — max ring buffer size
+> - `ethtool -C $iface adaptive-rx on adaptive-tx on tx-usecs 750` — coalescing
+> - IRQ affinity spreading eth1 IRQs across cores 0–79, eth2 across 80–159
+
+> **Note on `sysctl -p` with tuned-adm profiles:** The `.conf.tuned` file uses
+> `[section]` headers (tuned-adm format). `sysctl -p` will emit errors for those
+> lines but still applies all valid `key=value` lines. The errors are harmless.
+
+### 5. iperf3 client command format — use `-B` to bind source IP
+```bash
+# WRONG — no source binding, OS picks interface, may misroute:
+iperf3 -c 192.168.214.207 -p 5201 --parallel 100 -t 30
+
+# CORRECT — bind client to the matching source IP on the same subnet:
+iperf3 -c 192.168.214.207 -B 192.168.214.206 -p 5201 --parallel 100 -t 30
+```
+Without `-B`, on a system with 4 benchmark interfaces + a management port, TCP routing
+may pick a suboptimal source interface, capping throughput or routing over the wrong NIC.
+
+### 6. Parallel streams (-P) for 400GbE
+Single-stream TCP (`-P 1`) is always limited by single-flow CPU send rate — expect
+~28–35 Gbps per stream regardless of link speed. To fill a 400G pipe:
+- **`-P 8`** with large window: reaches ~300–350 Gbps (good for baseline check)
+- **`-P 25`** to **`-P 100`**: needed to approach line rate (~365–400 Gbps on CX8)
+- The demo/validation command used by the platform team: **`--parallel 100`**
+
+---
+
 ## Prerequisites
 
 Run on **both systems** before any benchmark:
@@ -729,12 +836,248 @@ VERDICT: PASS — Both 400GbE links operating at ≥ 97% line rate.
 
 ---
 
+## Troubleshooting — PCIe Speed Downgrade (Most Common Silent Failure)
+
+### Symptom
+Results look like a low-bandwidth NIC: single-stream ~28 Gbps, multi-stream plateau at
+same value, no improvement with more parallel streams. No errors in iperf3 output.
+
+### Diagnosis
+```bash
+# Check PCIe link speed — run on the SERVER system
+for dev in $(lspci | grep -i mellanox | awk '{print $1}' | grep "00\.0$"); do
+    echo "=== $dev ==="
+    lspci -s $dev -vv 2>/dev/null | grep -E "LnkCap:|LnkSta:|LnkCtl2:"
+done
+```
+
+**Gen1 (broken):**
+```
+LnkCap: Speed 64GT/s, Width x16   ← NIC capable of Gen6
+LnkSta: Speed 2.5GT/s (downgraded), Width x16   ← stuck at Gen1
+LnkCtl2: Target Link Speed: 2.5GT/s   ← BIOS/error-state forced target
+```
+
+**Expected (healthy):**
+```
+LnkSta: Speed 64GT/s, Width x16   ← Gen6, no "(downgraded)"
+```
+
+**Impact by generation:**
+| PCIe Gen | Speed | ×16 bandwidth | Per-port max | What you see |
+|----------|-------|---------------|--------------|--------------|
+| Gen1 | 2.5 GT/s | 32 Gbps | ~28 Gbps | Looks like bad NIC |
+| Gen3 | 8 GT/s | ~126 Gbps | ~110 Gbps | Partial improvement |
+| Gen5 | 32 GT/s | ~504 Gbps | ~380 Gbps | Near line rate |
+| Gen6 | 64 GT/s | ~1008 Gbps | ~400 Gbps | Full line rate |
+
+### Root cause
+PCIe speed downgrades are caused by:
+1. **NIC thermal crash** (most common on this platform) — a fatal PCIe error from
+   overheating causes the root complex to lock `LnkCtl2 Target Speed` to 2.5 GT/s
+   as a safe fallback. This survives `reboot` but is cleared by a full power cycle.
+2. **BIOS PCIe speed setting** — some DMR BIOS defaults to Gen1 for compatibility.
+3. **Platform error log** — BIOS reads stored PCIe error state on POST and downgrades
+   the slot speed if a previous fatal error was logged.
+
+### Recovery — try in order
+
+**Step 1: In-band setpci retrain (fast, no downtime — often gets Gen3, not full speed)**
+```bash
+# Find parent bridge of the NIC (the address before XX:00.0 in the PCI tree)
+# e.g. if NIC is 0000:61:00.0, parent bridge is typically 0000:60:02.0
+lspci -tv | grep -B5 "61:00"   # find the bridge
+
+BRIDGE=0000:60:02.0  # adjust to your system
+
+# Read current LnkCtl2 and set target to Gen6 (0x6 = 64GT/s)
+LNKCTL2=$(setpci -s $BRIDGE CAP_EXP+30.w)
+setpci -s $BRIDGE CAP_EXP+30.w=$(printf "%04x" $(( (0x$LNKCTL2 & 0xfff0) | 6 )))
+
+# Trigger Retrain Link (bit 5 of LnkCtl, CAP_EXP+10)
+LNKCTL=$(setpci -s $BRIDGE CAP_EXP+10.w)
+setpci -s $BRIDGE CAP_EXP+10.w=$(printf "%04x" $(( 0x$LNKCTL | 0x0020 )))
+
+sleep 2
+lspci -s $BRIDGE -vv 2>/dev/null | grep -E "LnkSta:|LnkCtl2:"
+```
+> This approach got Gen1 → Gen3 (8 GT/s) on DMR-Q9UC but could not reach Gen5/Gen6.
+> Gen3 provides ~110 Gbps/port, up from 28 Gbps — usable but well below line rate.
+> Full recovery requires a hard power cycle (Step 2).
+
+**Step 2: OS reboot (fast — ~5 min, gets Gen3 at best on DMR-Q9UC after thermal crash)**
+```bash
+ssh $SERVER_HOST 'reboot'
+# Wait for system to come back (5–8 min for 160c DMR with 384GB RAM)
+for i in $(seq 1 40); do
+    ssh -o ConnectTimeout=5 -o BatchMode=yes $SERVER_HOST 'echo UP' 2>/dev/null && break
+    echo "$(date +%H:%M:%S) still down ($i/40)..."; sleep 15
+done
+# Check PCIe speed after reboot — may still be Gen3 if BIOS error state persists
+```
+> In our session: reboot recovered eth3/eth4 from physical crash, but PCIe stayed
+> at 2.5 GT/s (Gen1) because the BIOS error log was still set. Reboot alone did NOT
+> restore full PCIe speed after a thermal crash.
+
+**Step 3: BMC hard power cycle (required for full Gen5/Gen6 recovery)**
+
+This is the only reliable fix when `LnkCtl2 Target Speed` is stuck after a crash.
+A cold power cycle clears BIOS PCIe error state and forces a fresh full link training.
+
+```bash
+# 1. Find BMC IP — from inside the OS system
+ssh $SERVER_HOST 'ipmitool lan print 3 2>/dev/null | grep "^IP Address"'
+# Typically on channel 3 on DMR systems (not channel 1 which may show 0.0.0.0)
+# Also try channels: 1, 2, 6, 8 if channel 3 is empty
+
+# Example results:
+# S1 BMC: 10.3.172.244 (channel 3)
+# S2 BMC: 10.3.173.84  (channel 3)
+# Pattern: BMC IP is often S1_OS_IP + 10 or on adjacent /24
+
+# 2. Verify BMC is OpenBMC (SSH-based, NOT IPMI LAN)
+# OpenBMC uses SSH not IPMI over LAN — ipmitool -I lanplus will fail
+sshpass -p 'PASSWORD' ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no \
+    root@$BMC_IP 'echo connected'
+
+# 3. Check current power state
+sshpass -p 'PASSWORD' ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no \
+    root@$BMC_IP 'obmcutil hoststate 2>/dev/null'
+
+# 4. Hard power cycle via D-Bus (works when obmcutil chassiskill is missing)
+sshpass -p 'PASSWORD' ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no \
+    root@$BMC_IP '
+    busctl call xyz.openbmc_project.State.Chassis \
+        /xyz/openbmc_project/state/chassis0 \
+        org.freedesktop.DBus.Properties Set ssv \
+        xyz.openbmc_project.State.Chassis RequestedPowerTransition \
+        s "xyz.openbmc_project.State.Chassis.Transition.Off"
+    sleep 5
+    busctl call xyz.openbmc_project.State.Host \
+        /xyz/openbmc_project/state/host0 \
+        org.freedesktop.DBus.Properties Set ssv \
+        xyz.openbmc_project.State.Host RequestedHostTransition \
+        s "xyz.openbmc_project.State.Host.Transition.On"
+    '
+
+# 5. Poll for OS SSH access (cold boot takes 6–10 min on 160c DMR with 384GB RAM)
+for i in $(seq 1 40); do
+    ssh -o ConnectTimeout=5 -o BatchMode=yes $SERVER_HOST 'echo UP' 2>/dev/null && \
+        echo "Back up at $(date)" && break
+    echo "$(date +%H:%M:%S) still down ($i/40)..."; sleep 15
+done
+
+# 6. Immediately verify PCIe speed after boot — before applying any other config
+for dev in $(ssh $SERVER_HOST 'lspci | grep -i mellanox | awk "{print \$1}" | grep "00\.0$"'); do
+    echo -n "$dev: "
+    ssh $SERVER_HOST "lspci -s $dev -vv 2>/dev/null | grep 'LnkSta:' | head -1"
+done
+# Expected after cold cycle: Speed 64GT/s, Width x16  (no "downgraded")
+```
+
+> **Why `obmcutil chassiskill` may fail:** On some OpenBMC versions the
+> `/usr/libexec/chassiskill` helper binary is absent. Fall back to D-Bus `busctl`
+> calls directly — these work on all OpenBMC versions.
+
+> **Why `ipmitool -I lanplus` fails on OpenBMC:** OpenBMC does not implement
+> IPMI over LAN (RMCP+). Use SSH to the BMC IP instead. If SSH also fails,
+> try HTTP/REST API: `curl -k -u root:PASSWORD https://$BMC_IP/redfish/v1/Systems/`
+
+---
+
+## Troubleshooting — NIC Ports Down After Crash
+
+### Symptom
+After a previous session crashed or was killed, some interfaces are missing from
+`ip link show`. Example: eth3/eth4 absent while eth1/eth2 still present.
+
+### Diagnosis
+```bash
+ssh $SERVER_HOST 'ip link show | grep -E "^[0-9]+:"'
+# Missing interfaces → NIC crashed or driver probe failed
+
+# Check dmesg for crash timeline
+ssh $SERVER_HOST 'dmesg -T | grep -E "eth3|eth4|0001:11" | tail -20'
+# Key patterns to look for:
+#   "temp_warn: High temperature"        → NIC thermal fault
+#   "Fatal error 1 detected"             → NIC fatal PCIe error
+#   "PCI slot is unavailable"            → PCIe slot went offline
+#   "mlx5_init_one failed ... -110"      → FW init timed out (ETIMEDOUT)
+#   "firmware version: 65535.65535.65535" → NIC FW processor dead (all 0xFF)
+```
+
+### Common cause: iperf3 `-P 128` or `-P 64` overheating the NIC
+The CX8 NIC has onboard processing for high stream counts. Running `--parallel 128`
+sustained for several minutes can trigger a thermal shutdown of the NIC firmware
+processor. The NIC reports `temp_warn` → `Fatal error` → PCIe slot goes offline.
+The crash is stored in BIOS PCIe error log.
+
+**Safe `-P` values for CX8 sustained runs:** `--parallel 25` or less per port.
+`--parallel 100` across 4 ports (25/port) measured safe in our session.
+
+### Recovery from NIC crash with interfaces down
+```bash
+# Step 1: Try PCI FLR (Function Level Reset) — works for soft faults, not thermal
+echo "0001:11:00.0" > /sys/bus/pci/drivers/mlx5_core/unbind
+echo "0001:11:00.1" > /sys/bus/pci/drivers/mlx5_core/unbind
+sleep 1
+cat /sys/bus/pci/devices/0001:11:00.0/reset_method   # expect: flr bus
+echo 1 > /sys/bus/pci/devices/0001:11:00.0/reset
+sleep 2
+echo "0001:11:00.0" > /sys/bus/pci/drivers/mlx5_core/bind
+echo "0001:11:00.1" > /sys/bus/pci/drivers/mlx5_core/bind
+sleep 5
+ip link show | grep -E "eth[3-4]"
+# If FW comes back as "65535.65535.65535" → FLR insufficient, proceed to OS reboot
+
+# Step 2: OS reboot — sufficient to recover crashed interfaces
+ssh $SERVER_HOST 'reboot'
+# After reboot verify eth3/eth4 appear and links are UP
+ssh $SERVER_HOST 'ip -br addr show | grep -E "eth[1-4]"'
+```
+
+---
+
+## Live Baselines — Intel DMR-Q9UC (sc00901168s0095 ↔ sc00901168s0097)
+
+**Platform:** 2× DMR-Q9UC, 160c, 16×24GB DDR5 8000MT/s, Ubuntu 6.8.0-106-generic
+**NICs:** 2× Mellanox CX8 (ConnectX-8) per system, FW 40.48.1000
+**Links:** 4 total — eth1/eth2 (CX8 #1, `0000:61:00.x`) + eth3/eth4 (CX8 #2, `0001:11:00.x`)
+**Link IPs:** S1: 214.207/215.207/224.207/225.207 · S2: 214.206/215.206/224.206/225.206
+**PCIe:** 64 GT/s Gen6 ×16 per slot (after cold BMC power cycle to clear error state)
+**Tuning applied:** `tune_nic.sh` (63 queues, ring 8192), `sysctl.conf.tuned`, `set_aff_perf.sh`
+**iperf3 command format:** `iperf3 -c $SERVER_IP -B $CLIENT_IP -p $PORT --parallel 100 -t 30`
+
+| Test | Links | Streams | Result | Notes |
+|------|-------|---------|--------|-------|
+| Single stream | eth1 only | -P 1 | ~28 Gbps | PCIe ceiling visible even at Gen6 for 1 stream |
+| Multi-stream | eth1 only | -P 8 | ~28 Gbps | Same PCIe floor without tuning |
+| Demo command | eth1 only | -P 100, -B | **365 Gbps** | After Gen6 restore + tuning (91% of 400G) |
+| 4-link aggregate | eth1+2+3+4 | -P 25 each | **~447 Gbps total** | Uneven per-link (87/173/85/100) due to CPU spread |
+
+**Key observation:** Without the cold BMC power cycle and tuning scripts, results were
+28 Gbps (Gen1 PCIe) → ~110 Gbps (Gen3 after `setpci` retrain) → **365 Gbps** (Gen6 after
+cold power cycle + correct `-B` bind + `--parallel 100`). A 13× difference from start to finish.
+
+---
+
 ## Platform Notes
 
-- **PCIe Gen5 ×16 required for 400GbE.** At 400Gbps per port (50 GB/s), the NIC needs
-  ~100 GB/s PCIe bandwidth for full-duplex BiDir. PCIe Gen5 ×16 provides 128 GB/s per
-  direction. Gen4 ×16 (64 GB/s) will bottleneck BiDir at ~400 Gbps aggregate.
-  Verify: `lspci -vv | grep -A5 "Ethernet\|Network" | grep LnkSta`.
+- **PCIe Gen6 ×16 on CX8 NICs.** The ConnectX-8 uses PCIe Gen6 (64 GT/s ×16 = ~1008 Gbps).
+  Gen5 ×16 (~504 Gbps) is also sufficient for 400GbE dual-port. Either way, both are
+  far above the 800 Gbps NIC aggregate requirement.
+  Verify: `lspci -s <NIC_PCI_ADDR> -vv | grep LnkSta` — must show no `(downgraded)`.
+
+- **PCIe speed downgrade after thermal crash is silent and devastating.** A NIC
+  thermal crash causes BIOS to log a PCIe fatal error and cap `LnkCtl2 Target Speed`
+  to 2.5 GT/s on next boot. `reboot` does NOT fix it — only a hard BMC power cycle
+  (chassis off → on) clears the error log and restores full PCIe speed training.
+
+- **`setpci` retrain can partially recover PCIe speed in-band (no reboot).** Setting
+  `CAP_EXP+30.w` (LnkCtl2) to target Gen6 and triggering a retrain via bit 5 of
+  `CAP_EXP+10.w` (LnkCtl) on the parent bridge recovers Gen1 → Gen3. It cannot
+  reach Gen5/Gen6 after a thermal crash because BIOS equalization coefficients for
+  the high-speed retimers are not re-run. See Troubleshooting section above.
 
 - **NUMA affinity matters at 400GbE.** If the NIC's PCIe root port is on NUMA node 0,
   run iperf3 with CPU affinity to NUMA-local cores (`taskset -c 0-15`). Cross-NUMA
@@ -751,7 +1094,13 @@ VERDICT: PASS — Both 400GbE links operating at ≥ 97% line rate.
   must be pinned to a CPU core near the NIC's PCIe endpoint. Use
   `taskset -c <NUMA-local core> iperf3 -s -B $IP`.
 
-- **`-P` streams and queue count must match.** Intel E810 defaults to 8 queues per port.
-  Running `-P 16` with only 8 hardware queues has diminishing returns. Check:
-  `ethtool -l $IFACE_A0` — Combined: value should be ≥ the `-P` stream count.
-  Set: `ethtool -L $IFACE_A0 combined 16` before running -P16 tests.
+- **`-P` streams and queue count must match.** CX8 supports up to 63 combined queues
+  per port (`ethtool -L $IFACE combined 63`). Running `-P 100` with default queue
+  count (often 8) wastes streams — always apply `tune_nic.sh` or equivalent first.
+  Check: `ethtool -l $IFACE_A0` — Combined (current): should be ≥ your `-P` value.
+
+- **`-P 128` or higher risks NIC thermal shutdown on CX8.** Each parallel stream
+  adds NIC processing load. Sustained `-P 128` during previous sessions caused a
+  CX8 thermal fault (`temp_warn` → `Fatal error 1`) that took down eth3/eth4 and
+  required a full BMC power cycle to recover. Cap at **`-P 25` per port** for
+  sustained runs. Use `-P 100` only as a short peak measurement.
