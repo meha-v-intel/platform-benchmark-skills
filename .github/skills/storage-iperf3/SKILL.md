@@ -155,6 +155,29 @@ Single-stream TCP (`-P 1`) is always limited by single-flow CPU send rate — ex
 - **`-P 25`** to **`-P 100`**: needed to approach line rate (~365–400 Gbps on CX8)
 - The demo/validation command used by the platform team: **`--parallel 100`**
 
+> **NOTE:** `-P 100` adds significant TCP connection setup overhead — each 30s test
+> can take 40–50s wall-clock due to 100 simultaneous SYN handshakes. Factor this in
+> when running sequential per-port tests (4 ports × ~45s = ~3 min for a full sweep).
+> For quick checks, `-P 25` still reaches 300+ Gbps and completes faster.
+
+> **NOTE:** `--logfile` + `-P 100` causes a segfault in some iperf3 versions (observed
+> on Ubuntu iperf3 3.x). Do not combine `--logfile` with high `-P` counts. For parallel
+> multi-link runs, either run sequentially without `--logfile`, or pipe stdout to a file:
+> `iperf3 ... -P 100 2>&1 | tee /tmp/eth2.log` as a workaround.
+
+> **NOTE:** `-P 100` teardown can hang indefinitely after the data phase completes.
+> What happens: with 100 streams all closing simultaneously, the iperf3 server collects
+> results sequentially from each socket, which can stall if any stream's FIN/ACK is
+> delayed — especially if a previous test was killed mid-run (leaving TIME_WAIT sockets
+> that collide with new ephemeral ports). The server log shows the test running fine
+> (e.g., `[SUM] 68-69s 371 Gbits/sec`) but the iperf3 client process hangs for 10+
+> minutes waiting for server-side result delivery. **Workaround:** if you know the test
+> duration, kill the client once `t+duration+15s` has elapsed and read the throughput
+> from the **server** log (`tail /tmp/s_ethN.log | grep "[SUM].*sec"`). Always run
+> servers with `> /tmp/s_ethN.log 2>&1` so the server-side intervals are preserved.
+> To avoid: wait 2× MSL (120 seconds) after killing a `-P 100` run before starting a
+> new one on the same port — this lets TIME_WAIT sockets expire.
+
 ---
 
 ## Prerequisites
@@ -1015,6 +1038,12 @@ The crash is stored in BIOS PCIe error log.
 **Safe `-P` values for CX8 sustained runs:** `--parallel 25` or less per port.
 `--parallel 100` across 4 ports (25/port) measured safe in our session.
 
+**NOTE (observed Apr 11 2026):** The thermal crash only hit the SERVER system (S1),
+not the client (S2). S2 was running `iperf3 -P 128/-P 64` client-side but its CX8
+stayed at Gen6. S1 (server) took the crash — server-side CX8 does heavy DMA and
+interrupt processing for every incoming stream, making it much more thermally loaded
+than the client under high `-P` counts. **Check PCIe speed on the server first.**
+
 ### Recovery from NIC crash with interfaces down
 ```bash
 # Step 1: Try PCI FLR (Function Level Reset) — works for soft faults, not thermal
@@ -1050,14 +1079,36 @@ ssh $SERVER_HOST 'ip -br addr show | grep -E "eth[1-4]"'
 
 | Test | Links | Streams | Result | Notes |
 |------|-------|---------|--------|-------|
-| Single stream | eth1 only | -P 1 | ~28 Gbps | PCIe ceiling visible even at Gen6 for 1 stream |
-| Multi-stream | eth1 only | -P 8 | ~28 Gbps | Same PCIe floor without tuning |
-| Demo command | eth1 only | -P 100, -B | **365 Gbps** | After Gen6 restore + tuning (91% of 400G) |
-| 4-link aggregate | eth1+2+3+4 | -P 25 each | **~447 Gbps total** | Uneven per-link (87/173/85/100) due to CPU spread |
+| Single stream | eth1 only | -P 1 | ~28 Gbps | PCIe Gen1 downgrade pre-fix — PCIe ceiling |
+| Multi-stream | eth1 only | -P 8 | ~28 Gbps | Same PCIe Gen1 ceiling with or without streams |
+| setpci retrain only | eth1 only | -P 100, -B | ~110 Gbps | Gen3 (8 GT/s) limit after setpci retrain |
+| **Single port** | **eth1 (CX8 #1 p1)** | **-P 100, -B** | **365 Gbps** | Gen6 after cold BMC cycle + tuning (91% line rate) |
+| **Single port** | **eth2 (CX8 #1 p2)** | **-P 100, -B** | **365 Gbps** | Server interval avg (teardown hung; see note below) |
+| **Single port** | **eth3 (CX8 #2 p1)** | **-P 100, -B** | **356 Gbps** | CX8 #2 (recovered from thermal crash) — 89% line rate |
+| **Single port** | **eth4 (CX8 #2 p2)** | **-P 100, -B** | **353 Gbps** | Server interval avg — 88% line rate |
+| 4-link aggregate | eth1+2+3+4 | -P 25 each | **~447 Gbps total** | Uneven per-link due to CPU spread (older run) |
+
+> **Per-port summary (production baseline):**
+> eth1: 365 Gbps · eth2: 365 Gbps · eth3: 356 Gbps · eth4: 353 Gbps
+> All 4 × 400G ports: **353–365 Gbps** (88–91% of line rate)
+> CX8 #2 (recovered from thermal crash + cold BMC cycle) ≈ CX8 #1 performance — no detectable degradation.
+
+> **Reading throughput from server log when client teardown hangs:**
+> When the iperf3 client hangs in teardown (common with `-P 100`, see note above), read
+> results from the server-side log instead:
+> ```bash
+> # Average across all 1-second intervals:
+> grep "^\[SUM\]" /tmp/s_ethN.log | awk '{sum+=$6; count++} END {printf "avg: %.0f Gbps over %d intervals\n", sum/count, count}'
+> # Or if final summary line appeared ("receiver"):
+> grep "\[SUM\].*receiver" /tmp/s_ethN.log | tail -1
+> ```
+> The per-interval avg is reliable: eth2 avg was 365 Gbps across 69 intervals (vs 365 Gbps
+> on eth1's clean run), confirming the method gives consistent results.
 
 **Key observation:** Without the cold BMC power cycle and tuning scripts, results were
 28 Gbps (Gen1 PCIe) → ~110 Gbps (Gen3 after `setpci` retrain) → **365 Gbps** (Gen6 after
-cold power cycle + correct `-B` bind + `--parallel 100`). A 13× difference from start to finish.
+cold power cycle + correct `-B` bind + `--parallel 100`). A **13× difference** from start to finish.
+CX8 #2 behavior after thermal crash and full cold boot recovery: **identical to new NIC**.
 
 ---
 
