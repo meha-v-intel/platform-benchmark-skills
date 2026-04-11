@@ -1,6 +1,6 @@
 # Storage Skills Checklist
 **Source:** `Storage_Segment_Validation_v0.5.xlsx` › Sheet: `1 Node StorageSegment Tests`  
-**Last updated:** April 10, 2026 (rev 5 — storage-minio added: MinIO + WARP benchmark skill for Test 117; 10 skills total)  
+**Last updated:** April 11, 2026 (rev 6 — iperf3 live-tested on S1/S2 DMR-Q9UC 160-core pair; SSH orchestration skill; EMON investigation methodology + DMR JSON metric refs; 12 skills total)  
 **System:** DMR 1S×32C×1T | 1×Micron 7450 NVMe (PCIe Gen5×4, 1.92TB) | 30GB RAM | CentOS Stream 10
 
 ---
@@ -153,17 +153,26 @@
 
 | Item | Status |
 |---|---|
-| **Eligibility** | ❌ NOT ELIGIBLE on this system (no 2nd machine, no 400GbE NIC) |
-| **Skill file** | ✅ `storage-iperf3/SKILL.md` (757 lines) + `README.md` |
-| **Doc depth** | ✅ Thorough — 95% |
-| **Tested live** | ❌ No — system is not eligible; skill is a reference implementation |
+| **Eligibility** | ❌ NOT ELIGIBLE on this system (no 2nd machine, no 400GbE NIC) · ✅ **LIVE-TESTED on S1/S2 DMR-Q9UC pair** |
+| **Skill file** | ✅ `storage-iperf3/SKILL.md` (1,157 lines) + `README.md` |
+| **Doc depth** | ✅ Thorough — 98% |
+| **Tested live** | ✅ **Yes** — run on S1 (`10.3.172.234`) + S2 (`10.3.175.0`) DMR-Q9UC 160-core, 4×400GbE CX8 NICs |
 | **Subtests covered** | 42 / 60 (iperf3 TCP/UDP groups; RDMA/perftest/netperf subtests not documented) |
-| **EMON integration** | ✅ Full — simultaneous perf stat on both SERVER and CLIENT, NIC-specific event set |
+| **EMON integration** | ✅ Full — simultaneous perf stat on both SERVER and CLIENT; `emon-workload-sweep` Phase 9 investigation methodology integrated (DMR-correct `UNC_OTC_*`/`UNC_ITC_*` events) |
 | **Config sweep** | ✅ Group F — 16-subtest sweep: MTU / -P count / TCP window / IRQ coalescing / CCA |
 | **Pass/fail thresholds** | ✅ Per-group thresholds with decision tree for sub-400 Gbps diagnosis |
-| **Branch** | `storage-skills` (also has standalone `README.md`) |
+| **Branch** | `storage-skills` (commits `87fe03d` + `20464b8`) |
 
-**Notes:** 5% gap = RDMA (perftest/ib_send_lat) and netperf subtests (18 of the 60 total) not documented — requires InfiniBand NIC hardware not available on this system and not in the 2-machine 400GbE topology described. Most complete skill for a system this agent cannot directly test.
+**DMR-Q9UC S1/S2 live baselines (April 2026):**
+- eth1 = **365 Gbps**, eth2 = **365 Gbps** (CX8 #1, socket 0, `0000:61:xx`)
+- eth3 = **356 Gbps**, eth4 = **353 Gbps** (CX8 #2, socket 1, `0001:11:xx`)
+- 4-port aggregate = **~1,400 Gbps** (all ports simultaneous, Gen6 ×16)
+- IRQ affinity applied via `set_aff_perf.sh` (63 queues per port, pinned to correct socket)
+
+**PCIe crisis + resolution documented in skill:**
+CX8 thermal crash → BIOS locked PCIe to Gen1 (2.5 GT/s) → throughput collapsed to 28 Gbps → `setpci` retrain → Gen3 (still limited) → BMC D-Bus cold power cycle → **Gen6 restored** → 365 Gbps. Full EMON-based diagnosis path documented in Phase 9.3.
+
+**Notes:** 2% gap = RDMA (perftest/ib_send_lat) and netperf subtests (18 of the 60 total) not documented — requires InfiniBand NIC hardware. `benchmark-ssh-orchestration/SKILL.md` (new) documents passwordless SSH setup, stale process cleanup, and multi-system orchestration pattern used for this test.
 
 ---
 
@@ -246,13 +255,20 @@ Single-node bottlenecks: PUT limited by NVMe write (~1,100 MiB/s for large objec
 | 106 | Erasure Coding (RS) | `storage-erasure-coding` | **100%** | ✅ Yes (all configs) | 21 (2 spec + 19 extended) |
 | 107 (SHA2) | SHA2-256 / SHA2-512 | `storage-hashing` | **100%** | ✅ Yes (26-pt sweep each) | 52 / 76 |
 | 107 (SMHasher) | SMHasher3 hashes | `storage-hashing` | **90%** | ✅ Yes (15 key hashes) | ~112 / 236 |
-| 108 | iperf3 400GbE | `storage-iperf3` | **95%** | ❌ No HW (reference) | 42 / 60 |
+| 108 | iperf3 400GbE | `storage-iperf3` | **98%** | ✅ Yes (S1/S2 DMR-Q9UC, 4×400GbE) | 42 / 60 |
 | 109–113 | FIO + Composite | `storage-fio-solo-dmr` · `storage-fio` | **solo: 95% · full: 40%** | ✅ Yes (solo-DMR, 5 subtests) | 9 / ~98 |
 | 114–116 | NAS / CDN / Ceph | — | **0%** | ❌ No infrastructure | 0 / ~188 |
 | 117 (WARP) | MinIO Put/Get sweep | `storage-minio` | **95%** | ✅ Yes (8 key baselines) | 112 / 114 |
 | 117 (MLPerf) | MLPerf TF_ObjectStorage | — | **0%** | ❌ No cluster/GPU | 0 / 2 |
 
-**Overall:** 10 skills created · ~522 / 949 subtests documented · ~382 / 949 subtests live-tested
+**Overall:** 12 skills created · ~522 / 949 subtests documented · ~382 / 949 subtests live-tested
+
+**Supplemental skills (methodology / tooling, not tied to a specific Test ID):**
+
+| Skill | Lines | Purpose | Tested |
+|---|---|---|---|
+| `benchmark-ssh-orchestration` | ~350 | Passwordless SSH setup, remote orchestration, server/client benchmark coordination | ✅ Used for iperf3 S1↔S2 |
+| `emon-workload-sweep` | 666 | EMON collection, EDP Excel analysis, iperf3 anomaly investigation methodology (Phase 9), DMR JSON metric refs | ✅ EMON smoke-tested on both S1/S2 |
 
 ---
 
@@ -262,6 +278,9 @@ Single-node bottlenecks: PUT limited by NVMe write (~1,100 MiB/s for large objec
 |---|---|---|---|
 | 1 | Fix SPEC ISO → install → run → create `storage-speccpu` skill | ~2 hrs (copy + rename + install) | 4 |
 | 2 | FIO skill (when deferred status lifted) | ~2 hrs | ~98 |
+| ✅ | ~~Run iperf3 live on S1/S2 DMR-Q9UC 160c pair + capture 4-port baselines~~ | Done | — |
+| ✅ | ~~iperf3 PCIe Gen1 crisis → diagnose via EMON → BMC cold cycle → Gen6 restored~~ | Done | — |
+| ✅ | ~~Create `benchmark-ssh-orchestration` + `emon-workload-sweep` Phase 9 skills~~ | Done | — |
 | ✅ | ~~Create `storage-minio` skill (MinIO + WARP, Test 117)~~ | Done | 112 |
 | ✅ | ~~Add EMON section to `storage-c2c`~~ | Done | — |
 | ✅ | ~~Create `storage-hashing` skill (SHA2-256 + SHA2-512)~~ | Done | 52 |

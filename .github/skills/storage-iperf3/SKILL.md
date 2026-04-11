@@ -248,6 +248,71 @@ ssh $SERVER_HOST "ss -tlnp | grep '520[12]'"
 
 ---
 
+## Output Directory & Sysconfig Capture
+
+Establish a persistent `$OUT` directory and capture sysconfig on **both systems** before
+starting EMON or any test group. These files are the raw data source for reports.
+
+```bash
+OUT=${OUTPUT_DIR:-${BENCHMARK_OUTDIR:-/datafs/benchmarks}/$(date +%Y%m%dT%H%M)-iperf3}
+mkdir -p $OUT/{bench,emon,monitor,sysconfig}
+echo "Output dir: $OUT"
+export OUT   # make available across shell sessions in this terminal
+
+# OS and CPU info — both systems
+for h in $SERVER_HOST $CLIENT_HOST; do
+    label=$([ "$h" = "$SERVER_HOST" ] && echo server || echo client)
+    ssh $h "lscpu && echo '---' && uname -r && grep PRETTY_NAME /etc/os-release" \
+        > $OUT/sysconfig/cpu_info_${label}.txt
+    ssh $h "numactl --hardware" > $OUT/sysconfig/numa_topology_${label}.txt
+done
+
+# PCIe link state — VERIFY FIRST: a downgraded link silently caps throughput at ~28 Gbps
+ssh $SERVER_HOST "
+    for iface in ${IFACE_A0} ${IFACE_A1:-}; do
+        [ -z \"\$iface\" ] && continue
+        pci=\$(ethtool -i \$iface 2>/dev/null | awk '/bus-info/{print \$2}')
+        echo \"=== \$iface → pci=\$pci ===\"
+        lspci -s \$pci -vv 2>/dev/null | grep -E 'LnkCap:|LnkSta:|LnkCtl2:'
+    done
+" | tee $OUT/sysconfig/pcie_state_server.txt
+# ⚠ STOP if LnkSta shows (downgraded) — see Troubleshooting: PCIe Recovery before proceeding
+
+# NIC configuration — driver, speed, queue counts, coalescing
+for h in $SERVER_HOST $CLIENT_HOST; do
+    label=$([ "$h" = "$SERVER_HOST" ] && echo server || echo client)
+    ssh $h "
+        for iface in \$(ip -o link show up | awk -F': ' '/eth/{print \$2}' | head -8); do
+            echo \"--- \$iface ---\"
+            ethtool \$iface 2>/dev/null | grep -E 'Speed:|Duplex:|Link detected'
+            ethtool -i \$iface 2>/dev/null | grep -E 'driver|version|bus-info'
+            echo 'Queues:';    ethtool -l \$iface 2>/dev/null | grep -E 'Combined|RX|TX'
+            echo 'Coalescing:'; ethtool -c \$iface 2>/dev/null | grep -E 'usecs|frames|Adaptive'
+        done
+    " > $OUT/sysconfig/nic_config_${label}.txt
+done
+
+# TCP buffer and sysctl state
+for h in $SERVER_HOST $CLIENT_HOST; do
+    label=$([ "$h" = "$SERVER_HOST" ] && echo server || echo client)
+    ssh $h "sysctl net.core.rmem_max net.core.wmem_max net.ipv4.tcp_rmem \
+        net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.core.netdev_max_backlog \
+        2>/dev/null" > $OUT/sysconfig/sysctl_${label}.txt
+done
+
+# IRQ affinity state at run start
+for h in $SERVER_HOST $CLIENT_HOST; do
+    label=$([ "$h" = "$SERVER_HOST" ] && echo server || echo client)
+    ssh $h "grep -E 'eth|mlx5' /proc/interrupts 2>/dev/null" \
+        > $OUT/sysconfig/irq_affinity_${label}.txt
+done
+
+echo "Sysconfig captured to $OUT/sysconfig/"
+ls $OUT/sysconfig/
+```
+
+---
+
 ## EMON Collection — Network Workload PMU Events
 
 Start EMON/perf collection on **both systems** before running any test group.
@@ -306,6 +371,22 @@ ssh $CLIENT_HOST "nohup perf stat \
 echo "EMON started on both systems."
 ssh $SERVER_HOST "cat /tmp/iperf3_perf_server.pid"
 ssh $CLIENT_HOST "cat /tmp/iperf3_perf_client.pid"
+
+# Capture NIC stats and numastat baseline BEFORE running any test group
+for h in $SERVER_HOST $CLIENT_HOST; do
+    label=$([ "$h" = "$SERVER_HOST" ] && echo server || echo client)
+    ssh $h "
+        for iface in \$(ip -o link show up | awk -F': ' '/eth/{print \$2}' | head -8); do
+            echo '=== '\$iface' (pre-run) ==='
+            ethtool -S \$iface 2>/dev/null
+        done
+    " > $OUT/monitor/nic_stats_pre_${label}.txt
+    ssh $h "grep -E 'eth|mlx5' /proc/interrupts 2>/dev/null" \
+        > $OUT/monitor/irq_pre_${label}.txt
+done
+ssh $SERVER_HOST "numastat -c 2>/dev/null || numastat 2>/dev/null | head -30" \
+    > $OUT/monitor/numastat_pre.txt
+echo "Pre-run monitor baseline captured → $OUT/monitor/"
 ```
 
 ### Stop EMON — After All Groups Complete
@@ -321,9 +402,63 @@ ssh $CLIENT_HOST "
     [ -n \"\$PID\" ] && kill -INT \$PID && sleep 3 && echo 'CLIENT perf stopped'"
 
 # Retrieve to local output dir
-scp ${SERVER_HOST}:/tmp/iperf3_perf_server.txt $OUT/emon_server.txt
-scp ${CLIENT_HOST}:/tmp/iperf3_perf_client.txt $OUT/emon_client.txt
-echo "EMON data saved to: $OUT/emon_server.txt  $OUT/emon_client.txt"
+scp ${SERVER_HOST}:/tmp/iperf3_perf_server.txt $OUT/emon/emon_server.txt
+scp ${CLIENT_HOST}:/tmp/iperf3_perf_client.txt $OUT/emon/emon_client.txt
+echo "EMON data saved to: $OUT/emon/emon_server.txt  $OUT/emon/emon_client.txt"
+
+# Capture post-run NIC stats, IRQ distribution, and temperatures
+for h in $SERVER_HOST $CLIENT_HOST; do
+    label=$([ "$h" = "$SERVER_HOST" ] && echo server || echo client)
+    ssh $h "
+        for iface in \$(ip -o link show up | awk -F': ' '/eth/{print \$2}' | head -8); do
+            echo '=== '\$iface' (post-run) ==='
+            ethtool -S \$iface 2>/dev/null
+        done
+    " > $OUT/monitor/nic_stats_post_${label}.txt
+    ssh $h "grep -E 'eth|mlx5' /proc/interrupts 2>/dev/null" \
+        > $OUT/monitor/irq_post_${label}.txt
+    # NIC port temperature (supported on CX7/CX8 with recent firmware)
+    ssh $h "
+        for iface in \$(ip -o link show up | awk -F': ' '/eth/{print \$2}' | head -8); do
+            echo -n \"\$iface temp: \"
+            ethtool -m \$iface 2>/dev/null | grep -i 'temp' | head -2 \
+                || echo 'not supported'
+        done
+    " | tee -a $OUT/monitor/thermal.txt
+done
+ssh $SERVER_HOST "numastat -c 2>/dev/null || numastat 2>/dev/null | head -30" \
+    > $OUT/monitor/numastat_post.txt
+
+# Compute NIC drop/error counter delta (pre → post) — non-zero = packet loss during test
+python3 - <<'PYEOF' > $OUT/monitor/nic_drop_delta.txt
+import re, os, sys
+OUT = os.environ.get('OUT', '/tmp/iperf3_results')
+
+def parse_stats(fpath):
+    c = {}
+    try:
+        for line in open(fpath):
+            m = re.match(r'\s+([\w_]+):\s+(\d+)', line)
+            if m: c[m.group(1)] = int(m.group(2))
+    except FileNotFoundError:
+        pass
+    return c
+
+for label in ('server', 'client'):
+    pre  = parse_stats(f'{OUT}/monitor/nic_stats_pre_{label}.txt')
+    post = parse_stats(f'{OUT}/monitor/nic_stats_post_{label}.txt')
+    drops = {k: post[k] - pre.get(k, 0) for k in post
+             if any(x in k.lower() for x in ['drop','miss','error','discard','lost'])
+             and post[k] - pre.get(k, 0) != 0}
+    print(f'=== {label} drop/error deltas ===')
+    if drops:
+        for k, v in sorted(drops.items()): print(f'  {k}: +{v:,}')
+    else:
+        print('  (none — no drops or errors detected during test)')
+PYEOF
+
+echo "Post-run monitor data captured to $OUT/monitor/"
+ls $OUT/monitor/
 ```
 
 ### Parse EMON Results
@@ -826,35 +961,533 @@ CentOS Stream / RHEL 9, ice driver, BBR congestion control, sysctl-tuned.
 
 ---
 
-## Report Format
+---
+
+## Mandatory Reports
+
+`deep_dive_report.md` and `tuning_recommendations.md` are **REQUIRED after every iperf3
+run** — individual group, config sweep, or full suite. Generate both files even when all
+KPIs pass; the tuning report must then state "No misses — all KPIs met in this run."
+
+Write both files to `$OUT/` after all groups and EMON collection are complete.
+
+### Expected `$OUT/` structure after a full run
 
 ```
-IPERF3 NETWORK BANDWIDTH SWEEP — Test 108 (Storage Segment Validation)
-=======================================================================
-System A (SERVER) : <CPU model>, <N>C, <OS>, NIC: <model>
-System B (CLIENT) : <CPU model>, <N>C, <OS>
-Topology          : Back-to-back, 2 × 400GbE links, MTU 9000
-iperf3 version    : 3.x
+$OUT/
+├── bench/                          ← iperf3 JSON results (one per subtest)
+│   ├── 108.001_link1_tx_p1.json
+│   ├── 108.007_link1_tx_p8.json
+│   ├── ...
+│   └── config_sweep/sweep_results.txt
+├── emon/                           ← perf stat (collected during all groups)
+│   ├── emon_server.txt
+│   └── emon_client.txt
+├── monitor/                        ← telemetry snapshots (pre/post each run)
+│   ├── nic_stats_pre_server.txt    nic_stats_post_server.txt
+│   ├── nic_stats_pre_client.txt    nic_stats_post_client.txt
+│   ├── irq_pre_server.txt          irq_post_server.txt
+│   ├── numastat_pre.txt            numastat_post.txt
+│   ├── thermal.txt
+│   └── nic_drop_delta.txt
+├── sysconfig/                      ← one-time snapshot at run start
+│   ├── pcie_state_server.txt       ← most critical preflight artifact
+│   ├── nic_config_server.txt       nic_config_client.txt
+│   ├── cpu_info_server.txt         cpu_info_client.txt
+│   ├── numa_topology_server.txt
+│   ├── sysctl_server.txt           sysctl_client.txt
+│   └── irq_affinity_server.txt
+├── deep_dive_report.md             ← REQUIRED
+└── tuning_recommendations.md      ← REQUIRED
+```
 
-SUBTEST     MODE             LINK   RESULT        THRESHOLD   STATUS
-────────────────────────────────────────────────────────────────────
-108.001     TCP Tx -P1       Link1  340 Gbps       ≥300 Gbps  ✅ PASS
-108.007     TCP Tx -P8       Link1  385 Gbps       ≥370 Gbps  ✅ PASS
-108.009     TCP Tx -P16      Link1  393 Gbps       ≥380 Gbps  ✅ PASS
-108.010     TCP BiDir -P16   Link1  390/388 Gbps   ≥370 Gbps  ✅ PASS
-108.015     Agg Tx (both)    Both   772 Gbps total ≥750 Gbps  ✅ PASS
-108.017     Agg BiDir -P16   Both   781/779 Gbps   ≥740 Gbps  ✅ PASS
-108.019     UDP jitter       Link1  0.04ms          ≤0.1ms     ✅ PASS
-108.023     Sustained 60s    Link1  384 Gbps       ≥370 Gbps  ✅ PASS
-  ... (all 26 rows) ...
-────────────────────────────────────────────────────────────────────
-Peak per link  : ~393 Gbps (-P16)     Line rate: 400 Gbps   Utilization: 98%
-NIC aggregate  : ~772 Gbps (both Tx)  NIC limit: 800 Gbps   Utilization: 97%
-Full duplex    : ~1.56 Tbps aggregate
+### Monitoring Telemetry Reference
 
-VERDICT: PASS — Both 400GbE links operating at ≥ 97% line rate.
-         Aggregate 800Gbps NIC bandwidth confirmed. Network is not the
-         bottleneck for NVMe-oF or NAS workloads on this topology.
+| Tool | Command | Purpose | Output file |
+|---|---|---|---|
+| `lspci -vv` | `lspci -s $NIC_PCI -vv \| grep LnkSta` | PCIe Gen — most critical: Gen1=28 Gbps, Gen6=400 Gbps | `sysconfig/pcie_state_server.txt` |
+| `ethtool` | `ethtool $IFACE` | Link speed (must be 400000Mb/s), Link detected | `sysconfig/nic_config_*.txt` |
+| `ethtool -l` | `ethtool -l $IFACE` | Queue count — Combined must be ≥ your -P stream count | `sysconfig/nic_config_*.txt` |
+| `ethtool -c` | `ethtool -c $IFACE` | IRQ coalescing — rx-usecs target is 50 for 400GbE | `sysconfig/nic_config_*.txt` |
+| `ethtool -S` (pre) | `ethtool -S $IFACE` | NIC counter baseline before test | `monitor/nic_stats_pre_*.txt` |
+| `ethtool -S` (post) | `ethtool -S $IFACE` | NIC counter delta — `rx_discards` delta is the drop signal | `monitor/nic_stats_post_*.txt` |
+| `ethtool -m` | `ethtool -m $IFACE` | NIC port temperature — flag if > 70°C | `monitor/thermal.txt` |
+| `/proc/interrupts` (pre) | `grep eth /proc/interrupts` | IRQ core distribution before test | `monitor/irq_pre_*.txt` |
+| `/proc/interrupts` (post) | same, after test | IRQ delta — verify spread across NUMA-local cores | `monitor/irq_post_*.txt` |
+| `perf stat -a` | `perf stat -a -e cycles,...` | IPC, LLC misses, cpu-migrations, softirq rate | `emon/emon_server.txt`, `emon/emon_client.txt` |
+| `numastat` (pre+post) | `numastat -c` | NUMA remote-page delta — non-zero = NUMA mismatch | `monitor/numastat_pre/post.txt` |
+| `sysctl` | `sysctl net.core.rmem_max ...` | TCP buffer sizes — must be ≥ 536870912 | `sysconfig/sysctl_*.txt` |
+
+### Generate deep_dive_report.md
+
+**Required sections:**
+
+1. **Platform Summary** — both systems: CPU model/cores/OS/kernel, NIC model + FW version, PCIe link speed (from `sysconfig/pcie_state_server.txt`)
+2. **Preflight Status** — PCIe Gen (PASS/FAIL), MTU per port, TCP rmem_max, IRQ affinity applied, NIC queue count, coalescing setting, iperf3 version
+3. **Monitoring Telemetry** — complete table from reference above with actual file paths in `$OUT`
+4. **Benchmark Results** — per-subtest: `subtest | mode | streams | Tx Gbps | threshold | PASS/FAIL | delta vs DMR ref`
+5. **Key Findings** — numbered list; each finding **must cite the raw file** it came from (e.g., `"cpu-migrations = 847/s from emon/emon_server.txt → IRQ affinity not applied"`)
+6. **Raw Data Files Index** — table of every file in `$OUT/` with one-line description
+7. **Overall Verdict** — PASS / CONDITIONAL / FAIL with one-sentence justification citing the binding constraint
+
+```bash
+# Step 1: parse all results into a table first
+python3 -c "
+import json, os, glob
+OUT = os.environ.get('OUT', '/tmp/iperf3_results')
+
+def gbps(path):
+    try:
+        d = json.load(open(path))
+        e = d['end']
+        tx = e.get('sum_sent',  e.get('sum', {})).get('bits_per_second', 0) / 1e9
+        rx = e.get('sum_received', {}).get('bits_per_second', 0) / 1e9
+        return tx, rx
+    except: return None, None
+
+THRESHOLDS = {
+    '108.001': 300, '108.002': 300, '108.003': 280,
+    '108.004': 300, '108.005': 300, '108.006': 280,
+    '108.007': 370, '108.008': 360, '108.009': 380, '108.010': 370,
+    '108.011': 370, '108.012': 360, '108.013': 380, '108.014': 370,
+    '108.015': 750, '108.016': 750, '108.017': 740, '108.018': 730,
+    '108.023': 370, '108.024': 370, '108.025': 730,
+}
+
+print('| Subtest | Description | Tx Gbps | Rx Gbps | Threshold | Status |')
+print('|---|---|---|---|---|---|')
+for path in sorted(glob.glob(f'{OUT}/bench/108.*.json')):
+    name  = os.path.basename(path).replace('.json', '')
+    subid = name.split('_')[0]
+    tx, rx = gbps(path)
+    if tx is None: continue
+    thresh  = THRESHOLDS.get(subid)
+    status  = ('✅ PASS' if tx >= thresh else '❌ FAIL') if thresh else '—'
+    rxcol   = f'{rx:.1f}' if rx else '—'
+    desc    = '_'.join(name.split('_')[1:])[:28]
+    print(f'| {subid} | {desc:<28} | {tx:>6.1f} | {rxcol:>6} | {thresh or \"—\":>5} | {status} |')
+"
+
+# Step 2: read key EMON signals
+echo ""
+echo "=== EMON signals (server) ==="
+awk '
+/cpu-migrations/  { printf "cpu-migrations:  %s/interval\n", $1 }
+/context-switches/{ printf "context-switches:%s/interval\n", $1 }
+/LLC-load-misses/ { printf "LLC-load-misses: %s\n", $1 }
+/softirq_entry/   { printf "softirq-entry:   %s\n", $1 }
+' $OUT/emon/emon_server.txt 2>/dev/null | head -20
+
+echo ""
+echo "=== NIC drop delta ==="
+cat $OUT/monitor/nic_drop_delta.txt 2>/dev/null
+
+# Step 3: write the report (fill in values from above before saving)
+cat > $OUT/deep_dive_report.md << 'REPORT_EOF'
+# iperf3 Deep Dive Report — Test 108 Storage Segment Validation
+
+**Session:** FILL_DATE
+**Output dir:** FILL_OUT_DIR
+
+---
+
+## 1. Platform Summary
+
+| | Server (System A) | Client (System B) |
+|---|---|---|
+| Hostname | [from cpu_info_server.txt] | [from cpu_info_client.txt] |
+| CPU | [lscpu Model name] | [lscpu Model name] |
+| Cores | [lscpu CPU(s)] | [lscpu CPU(s)] |
+| OS / kernel | [grep PRETTY_NAME; uname -r] | same |
+| NIC model | [ethtool -i — driver + version] | same |
+| NIC FW version | [ethtool -i firmware-version] | same |
+| PCIe link speed | [from pcie_state_server.txt — LnkSta] | — |
+| Topology | Back-to-back, [N] × 400GbE links, MTU [value] | |
+| iperf3 version | [iperf3 --version] | same |
+| Tuning applied | tune_nic.sh / set_aff_perf.sh / sysctl-tuned (yes/no each) | same |
+
+---
+
+## 2. Preflight Status
+
+| Check | Value | Expected | Status |
+|---|---|---|---|
+| PCIe LnkSta | [from pcie_state_server.txt] | Speed 32+ GT/s, no (downgraded) | PASS/FAIL |
+| MTU Link1 | [from nic_config_server.txt] | 9000 | PASS/FAIL |
+| MTU Link2 | [from nic_config_server.txt] | 9000 | PASS/FAIL |
+| TCP rmem_max | [from sysctl_server.txt] | ≥ 536870912 | PASS/FAIL |
+| IRQ affinity | applied / not applied | applied | PASS/FAIL |
+| NIC queues (Combined) | [from nic_config_server.txt] | ≥ 8 per port | PASS/FAIL |
+| IRQ coalescing rx-usecs | [from nic_config_server.txt] | 50 µs | PASS/WARN/FAIL |
+| iperf3 version | [from iperf3 --version] | ≥ 3.7 | PASS/FAIL |
+| Stale iperf3 procs before run | [0 found / N found] | 0 | PASS/FAIL |
+
+---
+
+## 3. Monitoring Telemetry
+
+### Tools Executed
+
+| Tool | Command | Purpose | Raw Output File |
+|---|---|---|---|
+| lspci -vv | lspci -s $NIC_PCI -vv | PCIe Gen / speed | sysconfig/pcie_state_server.txt |
+| ethtool | ethtool $IFACE | Link speed + driver | sysconfig/nic_config_server.txt |
+| ethtool -l | ethtool -l $IFACE | Queue count | sysconfig/nic_config_server.txt |
+| ethtool -c | ethtool -c $IFACE | IRQ coalescing settings | sysconfig/nic_config_server.txt |
+| ethtool -S (pre) | ethtool -S $IFACE | NIC counter baseline | monitor/nic_stats_pre_server.txt |
+| ethtool -S (post) | ethtool -S $IFACE | NIC counter delta | monitor/nic_stats_post_server.txt |
+| ethtool -m | ethtool -m $IFACE | NIC port temperature | monitor/thermal.txt |
+| /proc/interrupts (pre) | grep eth /proc/interrupts | IRQ distribution before | monitor/irq_pre_server.txt |
+| /proc/interrupts (post) | same, after test | IRQ spread during run | monitor/irq_post_server.txt |
+| perf stat -a | perf stat -a -e cycles,... | IPC, LLC miss, cpu-migrations, softirq rate | emon/emon_server.txt + emon_client.txt |
+| numastat | numastat -c | NUMA remote-page delta | monitor/numastat_pre/post.txt |
+| sysctl | sysctl net.core.rmem_max ... | TCP buffer sysctl values | sysconfig/sysctl_server.txt |
+| python3 delta script | nic_drop_delta | rx_discards delta | monitor/nic_drop_delta.txt |
+
+### Metrics Observed
+
+| Metric | Server | Client | Expected | Status |
+|---|---|---|---|---|
+| IPC (system-wide) | [from emon_server.txt] | [from emon_client.txt] | > 0.5 for NIC workloads | — |
+| cpu-migrations/interval | [from emon_server.txt] | [from emon_client.txt] | < 100 per 5s interval | — |
+| context-switches/interval | [from emon_server.txt] | [from emon_client.txt] | < 3,000 per 5s interval | — |
+| LLC-load-misses | [from emon_server.txt] | [from emon_client.txt] | low = buffers in L3 | — |
+| NIC rx_discards delta | [from nic_drop_delta.txt] | [from nic_drop_delta.txt] | 0 (any value = ring overflow) | — |
+| NIC port temperature | [from thermal.txt] | — | < 70°C | — |
+| NUMA remote hits delta | [numastat_post - numastat_pre] | — | 0 | — |
+
+---
+
+## 4. Benchmark Results
+
+[Insert table from python3 parse output above — all 108.XXX subtests]
+
+---
+
+## 5. Key Findings
+
+[Numbered list — each finding MUST cite the raw file it came from]
+
+1. [example: "PCIe speed = 64 GT/s (Gen6) confirmed — from sysconfig/pcie_state_server.txt. Not the bottleneck."]
+2. [example: "cpu-migrations = 847/interval in emon/emon_server.txt → IRQ affinity not applied; run set_aff_perf.sh"]
+3. [example: "NIC rx_discards delta = 0 in monitor/nic_drop_delta.txt → ring buffer size adequate"]
+4. [example: "NUMA remote hits delta = 0 — NIC DMA and IRQ handlers on same NUMA node"]
+5. [example: "Throughput stable t=0 to t=60s in Group E — no thermal sag — from bench/108.023*.json intervals"]
+
+---
+
+## 6. Raw Data Files Index
+
+| File | Description |
+|---|---|
+| sysconfig/pcie_state_server.txt | PCIe LnkSta for all NIC slots — run first |
+| sysconfig/nic_config_server.txt | ethtool speed/queues/coalescing per port |
+| sysconfig/sysctl_server.txt | TCP socket buffer sysctl values |
+| sysconfig/cpu_info_server.txt | lscpu + OS/kernel version |
+| sysconfig/numa_topology_server.txt | numactl --hardware output |
+| sysconfig/irq_affinity_server.txt | /proc/interrupts snapshot at run start |
+| monitor/nic_stats_pre_server.txt | ethtool -S per port, before tests |
+| monitor/nic_stats_post_server.txt | ethtool -S per port, after tests |
+| monitor/nic_drop_delta.txt | Drop/error counter delta (pre→post) — key signal |
+| monitor/irq_pre_server.txt | /proc/interrupts before tests |
+| monitor/irq_post_server.txt | /proc/interrupts after tests (check spread) |
+| monitor/thermal.txt | NIC port temperature readings |
+| monitor/numastat_pre.txt | numastat baseline before tests |
+| monitor/numastat_post.txt | numastat after tests (delta should be 0) |
+| emon/emon_server.txt | perf stat intervals from server side |
+| emon/emon_client.txt | perf stat intervals from client side |
+| bench/108.XXX_*.json | iperf3 --json results per subtest |
+| bench/config_sweep/sweep_results.txt | Group F config sweep table |
+
+---
+
+## 7. Overall Verdict
+
+**[PASS / CONDITIONAL / FAIL]** — [one-sentence justification with binding constraint]
+
+*Example PASS:*
+"PASS — Both 400GbE links sustaining 353–365 Gbps (88–91% line rate). PCIe Gen6 confirmed.
+Aggregate ~1,400 Gbps across all 4 ports. Network is not the bottleneck for NVMe-oF or NAS."
+
+*Example CONDITIONAL:*
+"CONDITIONAL — Link1 passing at 385 Gbps but Link2 at 312 Gbps. Root cause: irq-coalescing
+coal=0 on CX8 #2 eth3/eth4 (from sysconfig/nic_config_server.txt). Apply ethtool -C rx-usecs 50
+on eth3/eth4 and re-run Group B."
+
+*Example FAIL:*
+"FAIL — Both links at 28 Gbps. PCIe LnkSta shows Speed 2.5GT/s (downgraded) in
+sysconfig/pcie_state_server.txt. Root cause: thermal crash locked Gen1. Action: BMC cold
+power cycle required. No other tuning is meaningful until PCIe is restored."
+REPORT_EOF
+echo "deep_dive_report.md written to $OUT/"
+```
+
+### Generate tuning_recommendations.md
+
+**Required sections:**
+
+1. **Header** — session ID, platform summary, date, outcome summary
+2. **KPI Scorecard** — one row per KPI: measured value | reference | gap | severity (Critical / High / Medium / Low / ✅ Pass)
+3. **Per-Issue Recommendations** — for each non-passing KPI: Assessment, Root Cause, Fix (bash block), Expected Improvement
+4. **Priority Order** — ranked action table
+5. **Combined Implementation Sequence** — Phase 1 (< 5 min, no reboot), Phase 2 (same session, validate), Phase 3 (if hardware action needed)
+
+> If all KPIs pass: generate tuning_recommendations.md anyway. Set all scorecard rows to
+> ✅ Pass and state: "No misses — all KPIs met in this run."
+
+```bash
+cat > $OUT/tuning_recommendations.md << 'TUNING_EOF'
+# iperf3 Tuning Recommendations — Test 108
+
+**Session:** FILL_DATE
+**Platform:** FILL_SERVER ↔ FILL_CLIENT
+**Outcome:** [PASS / CONDITIONAL / FAIL — one line summary]
+
+---
+
+## KPI Scorecard
+
+| KPI | Measured | Reference | Gap | Severity |
+|---|---|---|---|---|
+| Link1 Tx -P16 (108.009) | [Gbps] | ≥ 380 Gbps | [Δ] | [Critical/High/Medium/Low/✅ Pass] |
+| Link2 Tx -P16 (108.013) | [Gbps] | ≥ 380 Gbps | [Δ] | |
+| Aggregate Tx both links | [Gbps] | ≥ 750 Gbps | [Δ] | |
+| BiDir aggregate | [Gbps ea dir] | ≥ 740 Gbps | [Δ] | |
+| UDP loss at line rate | [%] | ≤ 0.5% | [Δ] | |
+| Sustained 60s vs 30s delta | [%] | < 5% | [Δ] | |
+| PCIe link speed | [GT/s] | 32+ GT/s, no (downgraded) | — | |
+| MTU | [value] | 9000 | — | |
+| TCP rmem_max | [bytes] | 536870912 | — | |
+| IRQ coalescing rx-usecs | [µs] | 50 | — | |
+| NIC queue count Combined | [value] | ≥ 8 per port | — | |
+| NIC rx_discards delta | [count] | 0 | — | |
+
+---
+
+## Per-Issue Recommendations
+
+[Include one block per non-passing KPI or warning. Remove passing items.
+Standard blocks for the most common issues:]
+
+### Issue: PCIe link downgraded — SEVERITY: CRITICAL
+**Assessment:** `sysconfig/pcie_state_server.txt` shows `LnkSta: Speed 2.5GT/s (downgraded)`.
+At Gen1 ×16 = 32 Gbps shared across both NIC ports → ~28 Gbps per port. No software tuning
+can overcome this; it is a hardware/BIOS state issue.
+**Root cause:** NIC thermal crash stored a PCIe fatal error in BIOS log → BIOS capped
+LnkCtl2 Target Speed to 2.5 GT/s on next POST. OS reboot alone does not clear it.
+**Fix:**
+~~~bash
+# BMC hard power cycle — the only reliable fix after a thermal crash
+BMC_IP=$(ssh $SERVER_HOST "ipmitool lan print 3 2>/dev/null | awk '/^IP Address\s*:/{print \$4}'")
+sshpass -p 'PASSWORD' ssh root@$BMC_IP '
+    busctl call xyz.openbmc_project.State.Chassis \
+        /xyz/openbmc_project/state/chassis0 \
+        org.freedesktop.DBus.Properties Set ssv \
+        xyz.openbmc_project.State.Chassis RequestedPowerTransition \
+        s "xyz.openbmc_project.State.Chassis.Transition.Off"
+    sleep 5
+    busctl call xyz.openbmc_project.State.Host \
+        /xyz/openbmc_project/state/host0 \
+        org.freedesktop.DBus.Properties Set ssv \
+        xyz.openbmc_project.State.Host RequestedHostTransition \
+        s "xyz.openbmc_project.State.Host.Transition.On"'
+~~~
+**Expected improvement:** 28 Gbps → 353–365 Gbps per port (+13×).
+
+---
+
+### Issue: MTU 1500 instead of 9000 — SEVERITY: HIGH
+**Assessment:** `sysconfig/nic_config_server.txt` shows mtu 1500. Without jumbo frames,
+TCP/IP overhead multiplies by 6× (1.5 KB segments vs 9 KB) → CPU and PCIe saturate at
+~200 Gbps regardless of stream count or window size.
+**Root cause:** Default kernel MTU not changed, or network path contains a switch with
+MTU 1500 (check switch MTU if direct-connect gives 1500).
+**Fix:**
+~~~bash
+for h in $SERVER_HOST $CLIENT_HOST; do
+    for iface in $IFACE_A0 ${IFACE_A1}; do
+        ssh $h "ip link set $iface mtu 9000 && echo $iface: mtu 9000 OK"
+    done
+done
+# Verify: ssh $SERVER_HOST "ip link show $IFACE_A0 | grep mtu"
+~~~
+**Expected improvement:** ~200 Gbps → ~390 Gbps (+2×).
+
+---
+
+### Issue: TCP socket buffers too small — SEVERITY: HIGH
+**Assessment:** `sysconfig/sysctl_server.txt` shows `net.core.rmem_max` < 536870912.
+At 400 Gbps with RTT ~1 µs, bandwidth-delay product needs ≥ 50 MB window.
+`-w 256m` in iperf3 is silently capped by the OS buffer limit.
+**Fix:**
+~~~bash
+for h in $SERVER_HOST $CLIENT_HOST; do
+    ssh $h "
+        sysctl -w net.core.rmem_max=536870912
+        sysctl -w net.core.wmem_max=536870912
+        sysctl -w net.ipv4.tcp_rmem='4096 87380 536870912'
+        sysctl -w net.ipv4.tcp_wmem='4096 65536 536870912'
+    "
+done
+~~~
+**Expected improvement:** ~190 Gbps → ~390 Gbps (+2×).
+
+---
+
+### Issue: IRQ coalescing too low (coal=0 or default) — SEVERITY: MEDIUM
+**Assessment:** `ethtool -c $IFACE` in `sysconfig/nic_config_server.txt` shows
+rx-usecs = 0 or 3 (less than 50). At 400 Gbps ≈ 6 million packets/s per port →
+one interrupt per packet → CPU cores saturated by softirq handling alone.
+**Fix:**
+~~~bash
+for h in $SERVER_HOST $CLIENT_HOST; do
+    for iface in $IFACE_A0 ${IFACE_A1}; do
+        ssh $h "ethtool -C $iface rx-usecs 50 tx-usecs 50 adaptive-rx on adaptive-tx on"
+    done
+done
+~~~
+**Expected improvement:** ~312 Gbps (coal=0) → ~393 Gbps; +5–15 Gbps at high load.
+
+---
+
+### Issue: IRQ affinity not pinned — SEVERITY: MEDIUM
+**Assessment:** `monitor/irq_post_server.txt` shows NIC IRQs spread to non-NUMA-local
+cores, OR `emon/emon_server.txt` shows cpu-migrations > 500/interval.
+For a 2-socket system: CX8 #1 (socket 0) → cores 0–79; CX8 #2 (socket 1) → cores 80–159.
+Cross-socket assignment adds ~40ns/cache-line latency for every DMA buffer transferred.
+**Root cause:** `irqbalance` running and reassigning NIC IRQs at runtime.
+**Fix:**
+~~~bash
+for h in $SERVER_HOST $CLIENT_HOST; do
+    ssh $h "systemctl stop irqbalance"
+    ssh $h "bash /root/set_aff_perf.sh 2>/dev/null \
+        || echo 'set_aff_perf.sh not found — pin manually via /proc/irq/*/smp_affinity_list'"
+done
+# Verify: compare irq_pre_server.txt vs irq_post_server.txt (should show spread)
+~~~
+**Expected improvement:** +10–30 Gbps, especially for 4-port aggregate runs that
+exercise both NUMA domains simultaneously.
+
+---
+
+### Issue: NIC queue count < parallel streams — SEVERITY: MEDIUM
+**Assessment:** `ethtool -l $IFACE | grep Combined` in `nic_config_server.txt` shows
+Combined (current) < 8, but test used -P 8. Extra TCP streams map to the same NIC queues
+→ no additional parallelism, throughput plateaus at -P 1 level.
+**Fix:**
+~~~bash
+for h in $SERVER_HOST $CLIENT_HOST; do
+    for iface in $IFACE_A0 ${IFACE_A1}; do
+        ssh $h "ethtool -L $iface combined 63 2>/dev/null"   # CX8 max = 63
+    done
+done
+# Verify: ethtool -l $IFACE_A0 | grep Combined
+~~~
+**Expected improvement:** Single-queue plateau → multi-queue linear scaling with -P;
+typically +30–60 Gbps going from 1 queue to 8+ queues.
+
+---
+
+### Issue: NIC rx_discards > 0 — SEVERITY: MEDIUM
+**Assessment:** `monitor/nic_drop_delta.txt` shows rx_discards or rx_no_buffer_count > 0.
+Packets arrived at the NIC faster than the kernel could post new descriptors → ring overflow.
+**Fix:**
+~~~bash
+for h in $SERVER_HOST $CLIENT_HOST; do
+    for iface in $IFACE_A0 ${IFACE_A1}; do
+        ssh $h "ethtool -G $iface rx 8192 tx 8192"
+    done
+done
+# Verify: ethtool -g $IFACE_A0 | grep -A4 Current  (RX should show 8192)
+~~~
+**Expected improvement:** Drop counter returns to 0; eliminates UDP packet loss floor.
+
+---
+
+### Issue: NUMA remote hits > 0 — SEVERITY: LOW
+**Assessment:** `monitor/numastat_post.txt` delta shows non-zero remote node accesses.
+NIC DMA is depositing packet buffers on socket 0 but the IRQ handler runs on socket 1
+(or vice versa) → cross-NUMA memory copies at ~40ns per cache line.
+**Fix:**
+~~~bash
+# Pin iperf3 to the NUMA node matching the NIC's PCIe attachment
+# NIC on socket 0 → use numactl --cpunodebind=0 --membind=0
+ssh $CLIENT_HOST "numactl --cpunodebind=0 --membind=0 \
+    iperf3 -c $IP_A0 -B $IP_B0 -p 5201 -t 30 -w 256m -P 8"
+~~~
+**Expected improvement:** +5–15 Gbps for cross-NUMA cases; reduces CPU load.
+
+---
+
+## Priority Order
+
+| Priority | Action | Impact | Effort |
+|---|---|---|---|
+| 1 | BMC cold power cycle (if PCIe downgraded) | +330 Gbps per port | 10 min downtime |
+| 2 | Set MTU 9000 (if not set) | +~200 Gbps | 30 sec |
+| 3 | Set TCP socket buffers ≥ 536870912 | +~200 Gbps | 30 sec |
+| 4 | Apply tune_nic.sh + set_aff_perf.sh | +30–60 Gbps | 2 min |
+| 5 | Set IRQ coalescing rx-usecs 50 | +5–15 Gbps | 30 sec |
+| 6 | Set NIC queues to 63 (ethtool -L combined) | +30–60 Gbps if queues < 8 | 30 sec |
+| 7 | Increase ring buffers rx/tx 8192 | Eliminates rx_discards | 30 sec |
+| 8 | NUMA pin iperf3 + stop irqbalance | +5–15 Gbps | 2 min |
+| 9 | Switch to BBR (from cubic) | < 1% | 10 sec |
+
+---
+
+## Combined Implementation Sequence
+
+### Phase 1 — Immediate fixes (< 5 min, no reboot, high impact)
+Expected result: 200–280 Gbps → 365–393 Gbps (if PCIe is healthy).
+~~~bash
+for h in $SERVER_HOST $CLIENT_HOST; do
+    ssh $h "
+        # MTU + ring buffers + queues + coalescing
+        for iface in $IFACE_A0 ${IFACE_A1}; do
+            ip link set \$iface mtu 9000
+            ethtool -G \$iface rx 8192 tx 8192 2>/dev/null
+            ethtool -L \$iface combined 63 2>/dev/null
+            ethtool -C \$iface rx-usecs 50 tx-usecs 50 adaptive-rx on adaptive-tx on 2>/dev/null
+        done
+        # TCP buffers + CCA
+        sysctl -w net.core.rmem_max=536870912 net.core.wmem_max=536870912
+        sysctl -w net.ipv4.tcp_rmem='4096 87380 536870912'
+        sysctl -w net.ipv4.tcp_wmem='4096 65536 536870912'
+        sysctl -w net.ipv4.tcp_congestion_control=bbr
+        # IRQ affinity
+        systemctl stop irqbalance
+        bash /root/set_aff_perf.sh 2>/dev/null || true
+    "
+done
+~~~
+
+### Phase 2 — Validation (same session, after Phase 1)
+Re-run Group B (-P8 and -P16) to confirm Phase 1 improvements:
+~~~bash
+ssh $CLIENT_HOST "iperf3 -c ${IP_A0} -B ${IP_B0} -p 5201 \
+    -t 30 -w 256m -P 8 --json 2>/dev/null" \
+    | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+gbps = d['end']['sum_sent']['bits_per_second'] / 1e9
+status = '✅ PASS' if gbps >= 380 else '❌ still failing — check PCIe speed'
+print(f'Link1 -P8: {gbps:.1f} Gbps  {status}')
+"
+~~~
+If result still < 350 Gbps after Phase 1: check `sysconfig/pcie_state_server.txt` for
+`(downgraded)` → proceed to Phase 3.
+
+### Phase 3 — Hardware recovery (if needed, ~10 min downtime)
+Required if Phase 1+2 did not resolve to ≥ 380 Gbps per link:
+1. Check `sysconfig/pcie_state_server.txt` for `Speed 2.5GT/s (downgraded)`
+2. If present: **BMC cold power cycle** (see Troubleshooting section in this skill)
+3. After cold boot: re-run sysconfig capture, then Group B + Group C
+4. If still < 380 Gbps after cold boot: escalate — check BIOS PCIe slot settings and NIC firmware
+TUNING_EOF
+echo "tuning_recommendations.md written to $OUT/"
+echo ""
+echo "=== All reports in $OUT/ ==="
+ls -la $OUT/*.md
 ```
 
 ---
