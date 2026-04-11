@@ -382,53 +382,91 @@ Before interpreting any EMON metric, know what upper bounds apply to this worklo
 
 ### 9.2 — EMON metrics taxonomy for network workloads
 
-The following EDP sections are most diagnostic for iperf3:
+Full metric definitions in `references/emon-metric-guide.md`. JSON source files
+(1.28M lines total) are symlinked in `references/` for direct inspection.
+
+**DMR event rename warning:** DMR (PantherCove) renamed key events from GNR.
+Any GNR-era documentation or scripts using the old names will silently collect nothing.
+Key renames for network workloads:
+- `UNC_IIO_DATA_REQ_OF_CPU.*` → **does not exist on DMR** → replaced by `UNC_ITC_*` + `UNC_OTC_*`
+- `RESOURCE_STALLS.*` → `BE_STALLS.*`
+- `IDQ_UOPS_NOT_DELIVERED.CORE` → `IDQ_BUBBLES.CORE`
+- `OFFCORE_REQUESTS.*` → `OFFMODULE_REQUESTS.*`
+- `OFFCORE_RESPONSE.*` → `OMR.*` (separate offcore JSON file)
+- `UNC_M_RPQ_INSERTS` / `UNC_M_WPQ_INSERTS` → `UNC_HAMVF_HA_IMC_READS_COUNT` / `UNC_HAMVF_HA_IMC_WRITES_COUNT.FULL`
+
+See `references/emon-metric-guide.md` Section 7 for the full GNR→DMR rename table.
+
+#### DMR-Q9UC theoretical ceilings (baseline for anomaly detection)
+
+| Resource | Ceiling | Notes |
+|----------|---------|-------|
+| Memory BW | **1,024 GB/s** | 16ch × 8000 MT/s × 8B |
+| Per-port NIC | **400 Gbps** | PCIe Gen6 ×16 per CX8 slot |
+| Measured per-port | **353–365 Gbps** | eth1/2=365, eth3=356, eth4=353 |
+| PCIe Gen6 ×16 headroom | ~1 TB/s per slot | >> NIC requirement (not the bottleneck) |
+| Typical iperf3 DRAM use | ~50 GB/s | Only 5% of peak — never DRAM bound |
+| Max core IPC | 4.0 | 4-wide PantherCove |
+| Typical IRQ IPC | 0.5–1.5 | Burst interrupt work → short pipelines |
+
+**Key insight:** At 400 Gbps, PCIe and DRAM have enormous headroom. The binding
+constraint is always CPU cycles in softirq/interrupt processing. Start there.
 
 #### CPU utilization and IPC
-```
-Metric                  | What it tells you for iperf3
-------------------------|---------------------------------------------
-IPC (INST_RETIRED / CLK)| < 0.5 = interrupt-dominated, short-burst work
-                        | 0.5–1.5 = mixed kernel/user work
-                        | > 1.5 = well-pipelined (rare for net I/O)
-CPU_CLK_UNHALTED        | Per-core: shows which cores are actually busy
-                        | Ideal: IRQ cores saturated, others idle
-                        | Bad: core 0 alone saturated (IRQ not spread)
-```
 
-#### Memory hierarchy
-```
-Metric                          | What it tells you for iperf3
---------------------------------|---------------------------------------------
-LLC_MISS rate                   | High = data not cache-resident (expected for
-                                | large iperf3 sends, since buffers >> LLC)
-                                | Unusually high = fragmented descriptor ring
-UNC_M_CAS_COUNT (per channel)   | Should be moderate and spread across channels
-                                | Imbalance = NIC NUMA affinity mismatch
-                                | Near-zero = PCIe/NIC not DMAing (link problem)
-```
+| Metric (DMR name) | Formula | What it tells you for iperf3 |
+|-------------------|---------|------------------------------|
+| `metric_core IPC` | `INST_RETIRED.ANY / CPU_CLK_UNHALTED.THREAD` | < 0.5 = interrupt-dominated; 0.5–1.5 = normal net I/O |
+| `metric_CPU utilization %` | `100 * CLK_UNHALTED.THREAD / CLK_UNHALTED.REF_TSC` | % time in C0; should be 60–90% on IRQ cores |
+| `metric_CPU operating frequency (GHz)` | `CLK_UNHALTED.THREAD / CLK_UNHALTED.REF_TSC * TSC_FREQ / 1e9` | If lower than turbo, check power/thermal throttle |
+| `CPU_CLK_UNHALTED.THREAD` (per-core) | raw count | Shows which cores are actually busy — the IRQ spread diagnostic |
+| `metric_core c6 residency %` | — | High on most cores = IRQ not spread, work concentrated |
+| `TOPDOWN.BACKEND_BOUND_SLOTS` | — | High = backend stall; for iperf3 usually means memory latency |
+| `TOPDOWN.MEMORY_BOUND_SLOTS` | — | Subset of backend bound — specifically memory latency stalls |
 
-#### Uncore / PCIe / IIO
-```
-Metric                              | What it tells you for iperf3
-------------------------------------|---------------------------------------------
-UNC_IIO_DATA_REQ_OF_CPU.MEM_WRITE   | NIC→CPU DMA writes (incoming data)
-UNC_IIO_DATA_REQ_OF_CPU.MEM_READ    | CPU→NIC DMA reads (outgoing data)
-Low or near-zero IIO BW             | NIC is idle or PCIe link is degraded
-                                    | (confirmed root cause of Gen1 case: 28 Gbps)
-IIO on socket 0 but DRAM on socket 1| NUMA cross-traffic — CX8 #2 affinity mismatch
-```
+#### Memory hierarchy (DMR-correct event names)
 
-#### Interrupt and softirq distribution (via per-core view)
-```
-Metric                              | What it tells you
-------------------------------------|---------------------------------------------
-Per-core CPU_CLK_UNHALTED pattern   | Should spread across 80 cores per CX8 port
-                                    | (one CX8 per socket, 63 queues per port)
-If only 1–4 cores hot               | IRQ affinity not applied (run set_aff_perf.sh)
-If wrong cores hot (cores 80-159    | IRQ binding crossed socket boundary →
-for eth1/eth2 on CX8 #1)           | NUMA mismatch, expect ~20% throughput penalty
-```
+| Metric (DMR name) | What it tells you for iperf3 |
+|-------------------|------------------------------|
+| `metric_memory bandwidth read (MB/sec)` | `UNC_M_CAS_COUNT.RD * 64 / 1e6` — DDR reads from NIC DMA |
+| `metric_memory bandwidth write (MB/sec)` | `UNC_M_CAS_COUNT.WR * 64 / 1e6` — DDR writes from NIC DMA |
+| `UNC_M_CAS_COUNT.RD` per channel | Should be ~equal across 16 channels; imbalance = NUMA mismatch |
+| `UNC_HAMVF_HA_IMC_READS_COUNT` | Reads dispatched to IMC post-coherency (was `UNC_M_RPQ_INSERTS` on GNR) |
+| `UNC_HAMVF_TRACKER_INSERTS.LOCAL_IACA_1LM_DDR` | DDR access tracking (vs CXL T2/T3) |
+| `metric_LLC data read MPI (demand+prefetch)` | Per-instruction LLC miss rate; elevated for iperf3 (buffers >> LLC) |
+| `CYCLE_ACTIVITY.STALLS_L3_MISS` | Cycles stalled waiting for LLC miss fill → DRAM latency pressure |
+
+Near-zero `UNC_M_CAS_COUNT.RD` with near-zero throughput = NIC not DMAing = PCIe problem.
+
+#### IO bandwidth and interrupts (DMR-correct unit names)
+
+On DMR, the old `UNC_IIO_*` counters are split across three units:
+
+| Unit | What it measures | Metric formula |
+|------|-----------------|----------------|
+| `UNC_OTC_*` | IO **read** BW (64B granularity) | `metric_IO read BW = UNC_OTC_reads * 64 / 1e6` |
+| `UNC_ITC_*` | IO **write** BW (4B granularity!) | `metric_IO write BW = UNC_ITC_writes * 4 / 1e6` |
+| `UNC_SCA_*` | IO cache miss rates (was IIO miss) | `metric_IO read miss SCA %`, `metric_IO write miss SCA %` |
+
+Note the **4B vs 64B** asymmetry: writes use 4B granularity, reads use 64B.
+Getting this backwards overstates write BW by 16×.
+
+| Signal | What it tells you |
+|--------|-------------------|
+| Near-zero OTC + ITC BW | NIC is barely DMAing — PCIe link is degraded (Gen1 symptom) |
+| High SCA miss rate | NIC data not in SCA cache → elevated DRAM pressure from every NIC packet |
+| High `metric_IO MSI per sec` | Interrupt storm — too many MSI interrupts, consider raising `rx-usecs` coalescing |
+| ITC BW on socket 0 but IMC BW on socket 1 | Cross-NUMA DMA → IRQs pinned to wrong socket |
+
+#### Interrupt distribution (per-core view)
+
+| Signal | What it tells you |
+|--------|-------------------|
+| `CPU_CLK_UNHALTED` hot on cores 0–79 for eth1/eth2 | Normal — CX8 #1 IRQs on socket 0 cores |
+| `CPU_CLK_UNHALTED` hot on cores 0–79 for eth3/eth4 | Wrong — CX8 #2 should use socket 1 (cores ≥80) |
+| Only 1–4 cores hot total | IRQ affinity not applied — run `set_aff_perf.sh` |
+| All cores uniformly hot | All queues active — optimal; limited by per-core IPC |
+| Cross-CBB `LLC_HITM` elevated | NIC DMA landed in different CBB than IRQ core — CBB mismatch |
 
 ---
 
@@ -439,10 +477,10 @@ These are real anomalies observed during this session. Their EMON signatures hel
 #### Anomaly A: 28 Gbps on a 400G link (PCIe speed downgrade)
 
 - **Observed symptom:** All 4 ports plateau at 28 Gbps regardless of `-P` count or tuning
-- **EMON signature:** IIO BW very low (< 3 GB/s on MEM_WRITE and MEM_READ); IPC moderate (CPU not saturated); DRAM BW very low
+- **EMON signature:** `metric_IO read bandwidth` (OTC) and `metric_IO write bandwidth` (ITC) near-zero; `metric_CPU utilization %` moderate (CPU not saturated); `metric_memory bandwidth total` near-zero
 - **What EMON tells you:** The NIC is barely DMAing anything. The CPU is not the bottleneck. The problem is before the CPU — in the PCIe link.
 - **Root cause:** `lspci LnkSta: Speed 2.5GT/s (downgraded)` — BIOS locked PCIe to Gen1 after thermal crash. At Gen1 ×16 = 4 GB/s max → matches 28 Gbps observed.
-- **Hypothesis test:** `setpci` to retrain link → if IIO BW jumps but throughput still bounded → confirmed PCIe was the bottleneck → cold power cycle for Gen6.
+- **Hypothesis test:** `setpci` to retrain link → if `metric_IO read/write bandwidth` jumps but throughput still bounded → confirmed PCIe was the bottleneck → cold power cycle for Gen6.
 
 #### Anomaly B: Good throughput but highly uneven per-core CPU load
 
@@ -461,9 +499,9 @@ These are real anomalies observed during this session. Their EMON signatures hel
 
 #### Anomaly D: CX8 #2 ports underperforming vs CX8 #1 after recovery
 
-- **EMON investigation:** Compare IIO BW on PCIe domain `0001:11:xx` vs `0000:61:xx`
-- If CX8 #2 IIO BW is 30% lower → incomplete PCIe link recovery (still at Gen3) → cold boot needed
-- If equal but throughput lower → NUMA affinity issue (IRQs for eth3/eth4 landing on wrong socket)
+- **EMON investigation:** Compare `metric_IO read/write bandwidth` per ITC domain; OTC/SCA per PCIe domain (`0001:11:xx` vs `0000:61:xx`)
+- If CX8 #2 IO BW is 30% lower → incomplete PCIe link recovery (still at Gen3) → cold boot needed
+- If IO BW equal but throughput lower → NUMA affinity issue (IRQs for eth3/eth4 landing on wrong socket cores 0–79 instead of ≥80)
 
 ---
 
@@ -496,7 +534,7 @@ EMON check:
   1. Per-core CLK_UNHALTED: which cores handle eth3/eth4 interrupts?
      (set_aff_perf.sh should bind eth1 IRQs→cores 0-79, eth2 IRQs→cores 80-159)
   2. UNC_M_CAS_COUNT per DIMM channel: if eth3/eth4 data lands in socket 0 DRAM, cross-NUMA penalty
-  3. Compare IIO_DATA_REQ on domain 0001:11.x vs 0000:61.x
+  3. Compare `metric_IO read/write bandwidth` per ITC/OTC domain: `0001:11.x` vs `0000:61.x`
 
 Fix: verify set_irq_affinity_cpulist.sh properly maps eth3/eth4 IRQs to >160 cores (socket 1 equivalent)
 ```
@@ -576,7 +614,7 @@ When you open the post-processed Excel from an iperf3 run, go in this order:
 
 2. **Core view → CPU_CLK_UNHALTED heatmap** — is work distributed across 60+ cores? If concentrated in <10 cores, IRQ affinity is wrong. Note *which* cores are hot — that tells you which socket's NIC queue affinity applies.
 
-3. **Uncore view → IIO BW (per-domain)** — each CX8 is on a different PCIe domain (`0000:61:xx` and `0001:11:xx`). Compare IIO write BW across domains. If CX8 #2 is lower → incomplete Gen6 recovery or NUMA mismatch.
+3. **Uncore view → IO BW (per ITC/OTC domain)** — each CX8 is on a different PCIe domain (`0000:61:xx` and `0001:11:xx`). `metric_IO read BW` (OTC, 64B granularity) and `metric_IO write BW` (ITC, 4B granularity — different units, do not compare directly). If CX8 #2 IO BW is lower → incomplete Gen6 recovery or NUMA mismatch. Note: DMR has no `UNC_IIO_*` counters — these are GNR-only.
 
 4. **Uncore view → Memory controller (per-channel)** — imbalanced channel usage can indicate NUMA affinity issues. For iperf3, data fills buffers → if all writes land on 2 of 16 channels, something is wrong with address interleaving.
 
