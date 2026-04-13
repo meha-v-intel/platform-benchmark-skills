@@ -26,6 +26,75 @@ pass/fail evaluation, and EMON-based hardware telemetry collection.
 
 ---
 
+## Example Prompts — How to Use These Skills
+
+These are example requests you can type directly to **GitHub Copilot CLI**.
+No commands, no docs, no setup required — just describe what you want.
+
+> **How it works:** Each skill file encodes the full procedure (tools, flags, thresholds, diagnostics).
+> When you ask Copilot to run a workload, it reads the relevant skill and executes the entire workflow.
+
+---
+
+### Storage Workloads
+
+| Workload | Example prompt |
+|---|---|
+| **Memory latency & bandwidth** | *"Run the memory latency and bandwidth benchmark — give me idle DRAM latency, peak bandwidth, and the loaded latency curve"* |
+| **Core-to-core latency** | *"Measure core-to-core latency on this system and generate a full latency matrix"* |
+| **AES encryption throughput** | *"Benchmark AES-256-GCM encryption performance across all buffer sizes and tell me if AES-NI is being used"* |
+| **Compression throughput** | *"Run lz4, zlib, and zstd compression benchmarks with a sweep of levels and tell me the best compression-to-speed trade-offs"* |
+| **Erasure coding** | *"Benchmark Reed-Solomon erasure coding encode and decode throughput using ISA-L with a 10+4 config"* |
+| **Hashing / checksums** | *"Run SHA-256, SHA-512, CRC32C, and xxHash throughput tests and confirm hardware acceleration is active"* |
+| **Network bandwidth (iperf3)** | *"Run iperf3 between S1 and S2 across all 4 ports — give me per-port and aggregate throughput, and flag any link that looks degraded"* |
+| **Network with EMON telemetry** | *"Run the iperf3 test suite on S1 and S2 with EMON hardware counter collection and collect PCIe, IRQ, and NUMA telemetry"* |
+| **NVMe local I/O (boot disk)** | *"Run FIO benchmarks on the system's NVMe — 4K random IOPS, 128K sequential bandwidth, and a queue depth sweep"* |
+| **NVMe I/O (dedicated device)** | *"Run FIO on /dev/nvme1 with 4K random read/write and 128K sequential, then scale across all available NVMe drives"* |
+| **Object storage (MinIO)** | *"Deploy MinIO locally and run a WARP S3 benchmark across object sizes from 1KiB to 64MiB with a concurrency sweep"* |
+
+**Diagnostic prompts:**
+
+| Situation | Example prompt |
+|---|---|
+| iperf3 result is unexpectedly low | *"My iperf3 throughput on eth1 is only 28 Gbps — diagnose what's wrong and tell me how to fix it"* |
+| Not sure if AES-NI is working | *"Check whether AES-NI hardware acceleration is active on this system and show me the evidence"* |
+| NVMe performance seems off | *"Something is wrong with my NVMe throughput — run a quick FIO diagnostic and collect PCIe link status"* |
+| Want a full hardware investigation | *"Run an EMON sweep while iperf3 is running and tell me if the bottleneck is PCIe bandwidth, DRAM, CPU, or IRQ distribution"* |
+| Setting up two-system testing | *"Set up passwordless SSH between S1 and S2 so I can run server/client benchmarks across them"* |
+
+---
+
+### General Platform Benchmarks *(main branch skills)*
+
+| Workload | Example prompt |
+|---|---|
+| **Platform preflight** | *"Run preflight checks on this system — validate NUMA topology and confirm C-states are configured correctly before I start benchmarking"* |
+| **CPU frequency & turbo** | *"Measure the maximum CPU frequency and plot the turbo curve across core counts"* |
+| **Memory latency & bandwidth** | *"Run MLC and give me idle memory latency, peak bandwidth, and the latency-bandwidth trade-off curve"* |
+| **AMX throughput (BF16/INT8)** | *"Benchmark AMX matrix multiply throughput for BF16 and INT8 and tell me the TFLOPS / TOPS numbers"* |
+| **Wakeup / C-state latency** | *"Measure processor wakeup latency from C-states using wult and give me the C6 exit time distribution"* |
+| **Run all benchmarks** | *"Run all platform benchmarks in order — preflight first, then CPU, memory, AMX, and wakeup — and give me a summary at the end"* |
+
+---
+
+### Tips for Getting the Best Results
+
+```
+Be specific about the system (single system vs two systems)
+  ✅  "Run iperf3 between S1 and S2"
+  ✅  "Benchmark AES throughput on this system"
+
+Ask for diagnosis, not just numbers
+  ✅  "Run FIO and tell me if the result looks normal for this NVMe"
+  ✅  "Benchmark iperf3 and flag anything that looks wrong — I want root cause if something fails"
+
+Ask for the full workflow, not individual commands
+  ✅  "Run the full iperf3 test suite with telemetry and generate a report"
+  ❌  "What is the iperf3 command for 400G?"   ← just asks for a command, not a workflow
+```
+
+---
+
 ## Skills Reference
 
 ### Test 101 — Memory Subsystem (MLC)
