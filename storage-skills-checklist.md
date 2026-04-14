@@ -59,15 +59,16 @@
 
 | Item | Status |
 |---|---|
-| **Eligibility** | ❌ BLOCKED |
-| **Skill file** | ❌ Not created |
-| **Doc depth** | 0% |
-| **Tested live** | ❌ No — installation blocked |
-| **Subtests covered** | 0 / 4 |
-| **Blocker** | ISO 9660 Level 1 filename truncation (`scripts.misc` → `scripts.mis`, `exec_test` → `exec_tes`, `specsha512sum` → `specsha5`) |
-| **Branch** | — |
+| **Eligibility** | ✅ ELIGIBLE |
+| **Skill file** | ✅ `storage-speccpu2017/SKILL.md` (first draft, ~430 lines) |
+| **Doc depth** | ✅ ~70% — intrate + fprate fully documented; DMR full-suite baseline TBD (blocked on runtime) |
+| **Tested live** | ⚠️ Partial — `505.mcf_r` 1 iteration completed on DMR (ratio 43.3, 1194s, 32 copies). Full intrate/fprate not yet run. |
+| **Subtests covered** | 1 / 4 (mcf_r sanity check ✅; full intrate, fprate, speed not yet run) |
+| **Baselines in skill** | ✅ GNR all 10 intrate benchmarks + int_base=110 + fp_base=101 · DMR mcf_r=43.3 (1 iter) |
+| **Platform notes** | ✅ Full GNR vs DMR side-by-side: OS, SPEC version, config paths, compiler, run commands, numactl differences, libnsl fix |
+| **Branch** | `storage-skills` |
 
-**Notes:** Downloads are complete (`/tmp/speccpu_downloads/` — speccpu.iso 2.86 GB, gcc8 366 MB, gcc12 1.17 GB). Fix documented in `storage-workload-analysis.md`: copy ISO to writable dir, rename 3 truncated paths, re-run `install.sh`. Skill creation blocked until install succeeds.
+**Notes:** SPEC CPU 2017 v1.1.8 installed at `/opt/spec2017` with GCC 8.2.0 pre-built binaries. Blocker resolved: ISO 9660 Level 1 filename truncation fixed by extracting with `7z` and creating long-name symlinks before `install.sh`. libnsl.so.1 missing on CentOS Stream 10 fixed by symlinking `/lib64/libnsl.so.3 → libnsl.so.1`. Run scripts at `/opt/spec2017/cpu2017_intrate.sh`, `cpu2017_fprate.sh`, `cpu2017_intrate_quick.sh`. Full intrate run estimated 5–7 hours at 2.2 GHz.
 
 ---
 
@@ -247,7 +248,7 @@ Single-node bottlenecks: PUT limited by NVMe write (~1,100 MiB/s for large objec
 |---|---|---|---|---|---|
 | 101 | MLC Memory | `storage-mlc` | **100%** | ✅ Yes (Groups A + D) | 92 / 92 |
 | 102 | Core-to-Core Latency | `storage-c2c` | **100%** | ✅ Yes (full matrix) | 4 / 4 |
-| 103 | SpecCPU 2017 | — | **0%** | ❌ Blocked | 0 / 4 |
+| 103 | SpecCPU 2017 | `storage-speccpu2017` | **~70%** | ⚠️ Partial (mcf_r only, 1 iter) | 1 / 4 |
 | 104 (SW) | AES-256-GCM | `storage-encryption` | **100%** | ✅ Yes (all 26) | 26 / 26 |
 | 104 (QAT) | AES-256-GCM QAT | — | **0%** | ❌ No HW | 0 / 26 |
 | 105 | Compression (lz4/zlib/zstd) | `storage-compression` | **100%** | ✅ Yes (all groups) | 51 / 51 |
@@ -261,7 +262,7 @@ Single-node bottlenecks: PUT limited by NVMe write (~1,100 MiB/s for large objec
 | 117 (WARP) | MinIO Put/Get sweep | `storage-minio` | **95%** | ✅ Yes (8 key baselines) | 112 / 114 |
 | 117 (MLPerf) | MLPerf TF_ObjectStorage | — | **0%** | ❌ No cluster/GPU | 0 / 2 |
 
-**Overall:** 12 skills created · ~522 / 949 subtests documented · ~382 / 949 subtests live-tested
+**Overall:** 13 skills created · ~523 / 949 subtests documented · ~383 / 949 subtests live-tested
 
 **Supplemental skills (methodology / tooling, not tied to a specific Test ID):**
 
@@ -276,7 +277,8 @@ Single-node bottlenecks: PUT limited by NVMe write (~1,100 MiB/s for large objec
 
 | Priority | Action | Effort | Subtests unlocked |
 |---|---|---|---|
-| 1 | Fix SPEC ISO → install → run → create `storage-speccpu` skill | ~2 hrs (copy + rename + install) | 4 |
+| 1 | ✅ ~~Fix SPEC ISO → install → run → create `storage-speccpu2017` skill~~ | Done (Apr 14 2026) | 1 (mcf_r) |
+| 1b | Run full intrate + fprate (3 iterations) on DMR to establish baseline | ~5–7 hrs | 3 more |
 | 2 | FIO skill (when deferred status lifted) | ~2 hrs | ~98 |
 | ✅ | ~~Run iperf3 live on S1/S2 DMR-Q9UC 160c pair + capture 4-port baselines~~ | Done | — |
 | ✅ | ~~iperf3 PCIe Gen1 crisis → diagnose via EMON → BMC cold cycle → Gen6 restored~~ | Done | — |
