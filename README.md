@@ -11,13 +11,14 @@
 
 ## Overview
 
-This branch contains **12 Copilot CLI skills** covering Intel Storage Segment Validation Tests 101–117.
+This branch contains **13 Copilot CLI skills** covering Intel Storage Segment Validation Tests 101–117.
 Each skill automates a workload end-to-end: prerequisites, benchmark execution, output parsing,
 pass/fail evaluation, and EMON-based hardware telemetry collection.
 
 | Category | Skills | Tests covered |
 |---|---|---|
 | **Memory & CPU micro** | `storage-mlc`, `storage-c2c` | 101, 102 |
+| **CPU compute (SPEC)** | `storage-speccpu2017` | 103 |
 | **Crypto & compression** | `storage-encryption`, `storage-compression`, `storage-erasure-coding`, `storage-hashing` | 104–107 |
 | **Network** | `storage-iperf3` | 108 |
 | **Storage I/O** | `storage-fio`, `storage-fio-solo-dmr` | 109–113 |
@@ -40,6 +41,8 @@ No commands, no docs, no setup required — just describe what you want.
 
 | Workload | Example prompt |
 |---|---|
+| **SPEC CPU 2017 intrate** | *"Run SPECrate2017 integer benchmark on this system with 32 copies and compare against the GNR reference"* |
+| **SPEC CPU 2017 quick check** | *"Run a quick SPEC CPU sanity check using mcf_r to verify the setup is working before a full run"* |
 | **Memory latency & bandwidth** | *"Run the memory latency and bandwidth benchmark — give me idle DRAM latency, peak bandwidth, and the loaded latency curve"* |
 | **Core-to-core latency** | *"Measure core-to-core latency on this system and generate a full latency matrix"* |
 | **AES encryption throughput** | *"Benchmark AES-256-GCM encryption performance across all buffer sizes and tell me if AES-NI is being used"* |
@@ -122,6 +125,34 @@ produce a full N×N latency matrix. Includes EMON collection (`xsnp_hitm` — ME
 | Min latency (HT siblings) | 19.7 ns |
 | Max latency (distant mesh) | 115.4 ns |
 | Mean | 91.8 ns |
+
+---
+
+### Test 103 — CPU Integer & FP Rate (SPEC CPU 2017)
+**Skill:** [`storage-speccpu2017`](.github/skills/storage-speccpu2017/SKILL.md) · ~430 lines · ~70% coverage · ⚠️ Partial live-test (mcf_r validated)
+
+Runs **SPECrate2017_int_base** and **SPECrate2017_fp_base** using GCC 8.2.0 pre-built binaries.
+Includes full GNR↔DMR platform comparison — every config difference between the two systems
+is documented so the skill can be reproduced on either without guessing.
+
+SPEC CPU 2017 v1.1.8 installed at `/opt/spec2017`. Run scripts at `/opt/spec2017/cpu2017_intrate.sh`,
+`cpu2017_fprate.sh`, `cpu2017_intrate_quick.sh`. Pre-built binaries sourced from Intel cargo server.
+
+| Key baselines | GNR (Xeon 6972P, 26 copies) | DMR (32 cores, 32 copies) |
+|---|---|---|
+| 500.perlbench_r | 146 | TBD |
+| 502.gcc_r | 151 | TBD |
+| 505.mcf_r | 109 | **43.3** (1 iter, Apr 2026) |
+| 520.omnetpp_r | 69.3 | TBD |
+| 548.exchange2_r | 240 | TBD |
+| 557.xz_r | 61.5 | TBD |
+| **Est. SPECrate2017_int_base** | **110** | **TBD** (full run ~5–7 hrs) |
+| **Est. SPECrate2017_fp_base** | **101** | **TBD** |
+
+**Known issues resolved and documented in skill:**
+- ISO 9660 Level 1 filename truncation → `7z` extraction + symlink fix
+- `libnsl.so.1` missing on CentOS Stream 10 → symlink `libnsl.so.3 → libnsl.so.1`
+- Run directory CPU binding drift (copies 64–95 on 32-core system) → `rm -rf benchspec/*/run/*` before each run
 
 ---
 
@@ -332,6 +363,7 @@ stale process cleanup, and server/client workload orchestration (used for iperf3
 .github/skills/
 ├── storage-mlc/              # Test 101 — MLC memory subsystem
 ├── storage-c2c/              # Test 102 — Core-to-core latency
+├── storage-speccpu2017/      # Test 103 — SPEC CPU 2017 intrate / fprate ← new
 ├── storage-encryption/       # Test 104 — AES-256-GCM
 ├── storage-compression/      # Test 105 — lz4 / pigz / zstd
 ├── storage-erasure-coding/   # Test 106 — Reed-Solomon (ISA-L)
@@ -359,7 +391,7 @@ storage-skills-checklist.md   # Full test-by-test status checklist
 |---|---|---|---|---|
 | 101 | MLC Memory | `storage-mlc` | 100% | ✅ DMR |
 | 102 | Core-to-Core Latency | `storage-c2c` | 100% | ✅ DMR |
-| 103 | SpecCPU 2017 | — | 0% | ❌ Blocked (ISO install issue) |
+| 103 | SpecCPU 2017 | `storage-speccpu2017` | ~70% | ⚠️ Partial (mcf_r, 1 iter) |
 | 104 | AES-256-GCM (SW) | `storage-encryption` | 100% | ✅ DMR |
 | 105 | Compression (lz4/zlib/zstd) | `storage-compression` | 100% | ✅ DMR |
 | 106 | Erasure Coding (RS) | `storage-erasure-coding` | 100% | ✅ DMR |
