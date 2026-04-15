@@ -313,64 +313,86 @@ ls $OUT/sysconfig/
 
 ---
 
-## EMON Collection — Network Workload PMU Events
+## EMON Collection — Intel Hardware Counter Data
 
-Start EMON/perf collection on **both systems** before running any test group.
-Stop and collect after all groups complete. Runs for the duration of all iperf3 tests.
+Collect Intel EMON on **both systems** before running any test group using the SEP driver
+and full EDP event files. EMON multiplexes all PMU domains (core, IMC, PCIe, CHA, uncore)
+and `mpp.py` post-processes the `.dat` into a named-metric EDP Excel report.
+
+**Do NOT use `perf stat` as a substitute.** `perf stat` captures only a handful of Linux
+software events. It does not produce IMC bandwidth, PCIe IO BW, per-channel memory traffic,
+uncore stall counts, or the DMR-specific events (`UNC_HAMVF_*`, `UNC_ITC_*`, `UNC_OTC_*`,
+`UNC_SCA_*`) that are required to diagnose NIC bottlenecks at the hardware level.
 
 **Why collect on both systems:** SERVER processes NIC Rx/Tx interrupts + TCP stack;
-CLIENT drives the traffic generation. Both show different CPU bottleneck signatures.
+CLIENT drives traffic generation. Both systems produce distinct bottleneck signatures.
 
-### Network-Workload Event Set
+### EMON Prerequisites
 
+> **DMR-Q9UC live platform (sc00901168s0095 / sc00901168s0097):**
+> - SEP 5.58 beta at `/opt/intel/sep`; `sep_vars.sh` pre-sourced in `~/.bashrc`
+> - SEP driver loads at boot. If missing: `/opt/intel/sep/sepdk/src/insmod-sep`
+> - EDP files verified present on both systems:
+>   `diamondrapids_server_events_private.txt`, `diamondrapids_server_private.xml`,
+>   `chart_format_diamondrapids_server_private.txt`
+> - pyedp venv at `config/edp/pyedp/.venv/` (Python 3.12 + numpy/pyarrow/polars)
+
+```bash
+# Confirm EDP paths on orchestrating system
+EDP_EVENTS=$(ls /opt/intel/sep/config/edp/*events_private.txt 2>/dev/null | head -1)
+EDP_METRIC=$(ls /opt/intel/sep/config/edp/*_private.xml       2>/dev/null | head -1)
+EDP_FORMAT=$(ls /opt/intel/sep/config/edp/chart_format_*_private.txt 2>/dev/null | head -1)
+MPP_PY="/opt/intel/sep/config/edp/pyedp/mpp.py"
+echo "EDP events : $EDP_EVENTS"
+echo "EDP metric : $EDP_METRIC"
+echo "EDP format : $EDP_FORMAT"
+ls -la "$EDP_EVENTS" "$EDP_METRIC" "$EDP_FORMAT" "$MPP_PY" \
+    || { echo "EDP files missing — cannot collect EMON"; exit 1; }
+
+# Confirm SEP driver loaded on both systems
+for h in $SERVER_HOST $CLIENT_HOST; do
+    label=$([ "$h" = "$SERVER_HOST" ] && echo server || echo client)
+    ssh $h "lsmod | grep -q sep \
+        && echo '$label: SEP driver OK' \
+        || (echo '$label: loading SEP driver...' && \
+            /opt/intel/sep/sepdk/src/insmod-sep)"
+done
 ```
-cycles
-instructions
-cache-misses
-LLC-load-misses
-cpu-migrations
-context-switches
-page-faults
-irq:softirq_entry
-irq:softirq_exit
-```
-
-`cpu-migrations` and `context-switches` are the primary OS noise signals for NIC workloads.
-`LLC-load-misses` reveals whether packet buffers are evicting data from L3 (NUMA mismatch).
-`irq:softirq_entry/exit` counts per-interval NIC interrupt burden.
 
 ### Start EMON — Before Group A
 
 ```bash
 OUT=${OUTPUT_DIR:-/tmp/iperf3_results}
-mkdir -p $OUT
+mkdir -p $OUT/emon
 
-# Network PMU events — valid on Intel and AMD
-NET_EVENTS="cycles,instructions,cache-misses,LLC-load-misses,cpu-migrations,context-switches,page-faults"
+# Critical: use -f to write raw samples to .dat only.
+# Never redirect stdout to .dat — stdout carries EMON header text that corrupts the binary.
 
-# Add softirq tracepoints if available (kernel ≥ 5.10)
-perf list tracepoint 2>/dev/null | grep -q softirq \
-    && NET_EVENTS="${NET_EVENTS},irq:softirq_entry,irq:softirq_exit"
+# Start EMON on SERVER
+ssh $SERVER_HOST "
+    source /opt/intel/sep/sep_vars.sh
+    nohup emon -collect-edp edp_file=${EDP_EVENTS} \
+        -f /tmp/emon_iperf3_server.dat \
+        > /tmp/emon_iperf3_server.log 2>&1 &
+    echo \$! > /tmp/emon_iperf3_server.pid
+    sleep 5
+    kill -0 \$(cat /tmp/emon_iperf3_server.pid 2>/dev/null) \
+        && echo 'SERVER EMON started OK' \
+        || { echo 'SERVER EMON FAILED:'; cat /tmp/emon_iperf3_server.log; exit 1; }"
 
-# Start perf on SERVER (collects host-side NIC interrupt + TCP Rx processing cost)
-ssh $SERVER_HOST "nohup perf stat \
-    -e ${NET_EVENTS} \
-    -a --interval-print 5000 \
-    -o /tmp/iperf3_perf_server.txt \
-    sleep 86400 \
-    > /tmp/iperf3_perf_server.log 2>&1 & echo \$! > /tmp/iperf3_perf_server.pid"
+# Start EMON on CLIENT
+ssh $CLIENT_HOST "
+    source /opt/intel/sep/sep_vars.sh
+    nohup emon -collect-edp edp_file=${EDP_EVENTS} \
+        -f /tmp/emon_iperf3_client.dat \
+        > /tmp/emon_iperf3_client.log 2>&1 &
+    echo \$! > /tmp/emon_iperf3_client.pid
+    sleep 5
+    kill -0 \$(cat /tmp/emon_iperf3_client.pid 2>/dev/null) \
+        && echo 'CLIENT EMON started OK' \
+        || { echo 'CLIENT EMON FAILED:'; cat /tmp/emon_iperf3_client.log; exit 1; }"
 
-# Start perf on CLIENT (collects client-side send cost)
-ssh $CLIENT_HOST "nohup perf stat \
-    -e ${NET_EVENTS} \
-    -a --interval-print 5000 \
-    -o /tmp/iperf3_perf_client.txt \
-    sleep 86400 \
-    > /tmp/iperf3_perf_client.log 2>&1 & echo \$! > /tmp/iperf3_perf_client.pid"
-
-echo "EMON started on both systems."
-ssh $SERVER_HOST "cat /tmp/iperf3_perf_server.pid"
-ssh $CLIENT_HOST "cat /tmp/iperf3_perf_client.pid"
+echo "EMON collecting on both systems — run test groups now."
 
 # Capture NIC stats and numastat baseline BEFORE running any test group
 for h in $SERVER_HOST $CLIENT_HOST; do
@@ -392,19 +414,25 @@ echo "Pre-run monitor baseline captured → $OUT/monitor/"
 ### Stop EMON — After All Groups Complete
 
 ```bash
-# Stop on both systems
-ssh $SERVER_HOST "
-    PID=\$(cat /tmp/iperf3_perf_server.pid 2>/dev/null)
-    [ -n \"\$PID\" ] && kill -INT \$PID && sleep 3 && echo 'SERVER perf stopped'"
+# Stop cleanly with emon -stop — never kill the EMON PID directly.
+# emon -stop flushes final samples and closes the .dat file properly.
+ssh $SERVER_HOST "source /opt/intel/sep/sep_vars.sh && emon -stop && sleep 3 \
+    && echo 'SERVER EMON stopped'"
+ssh $CLIENT_HOST "source /opt/intel/sep/sep_vars.sh && emon -stop && sleep 3 \
+    && echo 'CLIENT EMON stopped'"
 
-ssh $CLIENT_HOST "
-    PID=\$(cat /tmp/iperf3_perf_client.pid 2>/dev/null)
-    [ -n \"\$PID\" ] && kill -INT \$PID && sleep 3 && echo 'CLIENT perf stopped'"
+# Retrieve raw .dat files and collection logs
+scp ${SERVER_HOST}:/tmp/emon_iperf3_server.dat $OUT/emon/emon_server.dat
+scp ${CLIENT_HOST}:/tmp/emon_iperf3_client.dat $OUT/emon/emon_client.dat
+scp ${SERVER_HOST}:/tmp/emon_iperf3_server.log $OUT/emon/emon_server_collect.log
+scp ${CLIENT_HOST}:/tmp/emon_iperf3_client.log $OUT/emon/emon_client_collect.log
 
-# Retrieve to local output dir
-scp ${SERVER_HOST}:/tmp/iperf3_perf_server.txt $OUT/emon/emon_server.txt
-scp ${CLIENT_HOST}:/tmp/iperf3_perf_client.txt $OUT/emon/emon_client.txt
-echo "EMON data saved to: $OUT/emon/emon_server.txt  $OUT/emon/emon_client.txt"
+# Validate .dat files are non-empty
+for f in $OUT/emon/emon_server.dat $OUT/emon/emon_client.dat; do
+    [ -s "$f" ] \
+        && echo "OK: $f — $(wc -l < "$f") lines, $(du -h "$f" | cut -f1)" \
+        || echo "WARNING: $f missing or empty — check collection log"
+done
 
 # Capture post-run NIC stats, IRQ distribution, and temperatures
 for h in $SERVER_HOST $CLIENT_HOST; do
@@ -417,7 +445,6 @@ for h in $SERVER_HOST $CLIENT_HOST; do
     " > $OUT/monitor/nic_stats_post_${label}.txt
     ssh $h "grep -E 'eth|mlx5' /proc/interrupts 2>/dev/null" \
         > $OUT/monitor/irq_post_${label}.txt
-    # NIC port temperature (supported on CX7/CX8 with recent firmware)
     ssh $h "
         for iface in \$(ip -o link show up | awk -F': ' '/eth/{print \$2}' | head -8); do
             echo -n \"\$iface temp: \"
@@ -429,11 +456,10 @@ done
 ssh $SERVER_HOST "numastat -c 2>/dev/null || numastat 2>/dev/null | head -30" \
     > $OUT/monitor/numastat_post.txt
 
-# Compute NIC drop/error counter delta (pre → post) — non-zero = packet loss during test
+# Compute NIC drop/error counter delta (pre → post)
 python3 - <<'PYEOF' > $OUT/monitor/nic_drop_delta.txt
-import re, os, sys
+import re, os
 OUT = os.environ.get('OUT', '/tmp/iperf3_results')
-
 def parse_stats(fpath):
     c = {}
     try:
@@ -443,7 +469,6 @@ def parse_stats(fpath):
     except FileNotFoundError:
         pass
     return c
-
 for label in ('server', 'client'):
     pre  = parse_stats(f'{OUT}/monitor/nic_stats_pre_{label}.txt')
     post = parse_stats(f'{OUT}/monitor/nic_stats_post_{label}.txt')
@@ -461,30 +486,231 @@ echo "Post-run monitor data captured to $OUT/monitor/"
 ls $OUT/monitor/
 ```
 
-### Parse EMON Results
+### Post-Process EMON — Generate EDP Excel Reports
+
+Run immediately after stopping EMON. Produces EDP Excel with all named hardware metrics
+across socket, core, thread, and uncore (IMC / PCIe / CHA) views.
 
 ```bash
-# Extract key metrics from each interval (5-second buckets)
-awk '
-/context-switches/ { printf "ctx_switches: %s\n", $1 }
-/cpu-migrations/   { printf "cpu_migrate:   %s\n", $1 }
-/LLC-load-misses/  { printf "LLC_miss:      %s\n", $1 }
-/cache-misses/     { printf "cache_miss:    %s\n", $1 }
-/softirq_entry/    { printf "softirq:       %s\n", $1 }
-' $OUT/emon_server.txt | head -60
+for label in server client; do
+    dat="$OUT/emon/emon_${label}.dat"
+    xlsx="$OUT/emon/emon_${label}.xlsx"
+    mpp_log="$OUT/emon/emon_${label}_mpp.log"
 
-# Interpretation thresholds for NIC workloads:
-# context-switches/s  < 3,000     → healthy (> 50,000/s = OS noise, kills NIC perf)
-# cpu-migrations/s    < 100       → healthy (> 500/s = NUMA locality broken)
-# LLC-load-misses     low         → packet buffers fit in L3 / NUMA-local
-# LLC-load-misses     high        → cross-NUMA DMA or buffer fragmentation
-# softirq_entry/s     ~NIC IRQ rate → validate against ethtool -S interrupt counts
+    [ -s "$dat" ] || { echo "SKIP $label — .dat missing or empty"; continue; }
+
+    echo "Post-processing EMON for $label..."
+    python3 "$MPP_PY" \
+        -i  "$dat" \
+        -m  "$EDP_METRIC" \
+        -f  "$EDP_FORMAT" \
+        -o  "$xlsx" \
+        --socket-view \
+        --core-view \
+        --thread-view \
+        --uncore-view \
+        -p  8 \
+        > "$mpp_log" 2>&1
+
+    if [ -f "$xlsx" ] && unzip -t "$xlsx" >/dev/null 2>&1; then
+        echo "OK: $xlsx — $(du -h "$xlsx" | cut -f1)"
+    else
+        echo "mpp.py FAILED for $label — last 20 lines:"
+        tail -20 "$mpp_log"
+    fi
+done
+echo "EDP Excel reports: $OUT/emon/"
 ```
 
-**EMON correlation with throughput:**
-- If `cpu-migrations` > 500/s AND throughput < 350 Gbps → IRQ affinity not set; run Group F config C
-- If `LLC-load-misses` > 5% of loads AND throughput < 360 Gbps → NUMA mismatch; check NIC PCIe NUMA node vs iperf3 CPU affinity
-- If `context-switches` > 10,000/s → irqbalance running and routing NIC interrupts to random cores; `systemctl stop irqbalance`
+**To re-run post-processing on existing .dat files:**
+```bash
+for dat in $OUT/emon/*.dat; do
+    name=$(basename "$dat" .dat)
+    python3 "$MPP_PY" -i "$dat" -m "$EDP_METRIC" -f "$EDP_FORMAT" \
+        -o "$OUT/emon/${name}.xlsx" \
+        --socket-view --core-view --thread-view --uncore-view -p 8
+done
+```
+
+### Parse All EMON Metrics from EDP Excel
+
+After mpp.py completes, parse the xlsx directly to extract all relevant hardware metrics.
+This covers the full set of DMR uncore, core, and IO domains — not just a handful of events.
+
+```bash
+python3 - <<'PYEOF' | tee $OUT/emon/emon_metrics_summary.txt
+import os, sys
+try:
+    import openpyxl
+except ImportError:
+    print("Installing openpyxl..."); import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "-q"])
+    import openpyxl
+
+OUT = os.environ.get('OUT', '/tmp/iperf3_results')
+
+# Key EDP metric names for network workloads on DMR
+# Grouped by diagnostic domain — all sourced from mpp.py socket_view sheet
+METRIC_GROUPS = {
+    "CPU Core": [
+        "metric_core IPC",
+        "metric_CPU utilization %",
+        "metric_CPU operating frequency (GHz)",
+        "metric_core c6 residency %",
+        "metric_unhalted core cycles per second",
+    ],
+    "Top-Down (TMA)": [
+        "metric_TMA_Frontend_Bound(%)",
+        "metric_TMA_Backend_Bound(%)",
+        "metric_TMA_Bad_Speculation(%)",
+        "metric_TMA_Retiring(%)",
+        "metric_TMA_Memory_Bound(%)",
+        "metric_TMA_Core_Bound(%)",
+    ],
+    "Memory Bandwidth (IMC)": [
+        "metric_memory bandwidth read (MB/sec)",
+        "metric_memory bandwidth write (MB/sec)",
+        "metric_memory bandwidth total (MB/sec)",
+        "metric_memory bandwidth utilization %",
+    ],
+    "LLC / Cache": [
+        "metric_LLC data read MPI (demand+prefetch)",
+        "metric_LLC data read (demand+prefetch) MPKI",
+        "metric_LLC RFO read MPI",
+        "metric_LLC total HITM (per instr)",
+        "metric_avg latency (in ns) of L3 Miss (demand data read)",
+    ],
+    "IO / PCIe Bandwidth (DMR OTC+ITC)": [
+        "metric_IO read BW (MB/sec)",          # UNC_OTC — 64B granularity
+        "metric_IO write BW (MB/sec)",         # UNC_ITC — 4B granularity (NOT comparable to read BW)
+        "metric_IO read miss % (SCA)",         # UNC_SCA — IO cache miss rate
+        "metric_IO write miss % (SCA)",
+        "metric_IO MSI per sec",               # MSI interrupt rate — high = coalescing needed
+    ],
+    "Uncore / Fabric": [
+        "metric_UPI bandwidth in (MB/sec)",
+        "metric_UPI bandwidth out (MB/sec)",
+        "metric_UPI utilization %",
+        "metric_CHA clockticks per second",
+        "metric_snoop traffic (per instr)",
+    ],
+}
+
+def read_socket_view(xlsx_path):
+    """Return dict of {metric_name: avg_value} from the socket_view sheet."""
+    try:
+        wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
+    except Exception as e:
+        return {}, str(e)
+    # mpp.py sheet names vary slightly — find socket-level sheet
+    sheet = None
+    for name in wb.sheetnames:
+        if 'socket' in name.lower() and 'summary' not in name.lower():
+            sheet = wb[name]; break
+    if sheet is None:
+        return {}, f"No socket sheet found. Sheets: {wb.sheetnames}"
+    # Row 1 = headers, subsequent rows = metric values per socket per interval
+    headers = [str(c.value).strip() if c.value else '' for c in next(sheet.iter_rows(min_row=1, max_row=1))]
+    data = {h: [] for h in headers if h}
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        for h, v in zip(headers, row):
+            if h and v is not None:
+                try: data[h].append(float(v))
+                except (TypeError, ValueError): pass
+    avgs = {k: (sum(v)/len(v) if v else None) for k, v in data.items()}
+    wb.close()
+    return avgs, None
+
+for label in ('server', 'client'):
+    xlsx = f'{OUT}/emon/emon_{label}.xlsx'
+    if not os.path.exists(xlsx):
+        print(f"\n=== {label.upper()} EMON — xlsx not found: {xlsx} ===\n")
+        continue
+    avgs, err = read_socket_view(xlsx)
+    if err:
+        print(f"\n=== {label.upper()} EMON — parse error: {err} ===\n")
+        continue
+
+    print(f"\n{'='*60}")
+    print(f"  EMON METRICS — {label.upper()} ({os.path.basename(xlsx)})")
+    print(f"{'='*60}")
+    for group, metrics in METRIC_GROUPS.items():
+        print(f"\n  [{group}]")
+        found_any = False
+        for m in metrics:
+            # Fuzzy match — EDP metric names sometimes differ slightly
+            val = avgs.get(m)
+            if val is None:
+                # Try case-insensitive substring match
+                key = next((k for k in avgs if m.lower() in k.lower()), None)
+                if key: val = avgs[key]; m = key
+            if val is not None:
+                print(f"    {m:<55} = {val:>12.3f}")
+                found_any = True
+        if not found_any:
+            print(f"    (no matching metrics found in this xlsx — check sheet name)")
+
+    # Per-core CLK_UNHALTED distribution — diagnose IRQ spread
+    try:
+        wb = openpyxl.load_workbook(xlsx, read_only=True, data_only=True)
+        core_sheet = next((wb[n] for n in wb.sheetnames
+                           if 'core' in n.lower() and 'summary' not in n.lower()), None)
+        if core_sheet:
+            headers = [str(c.value).strip() if c.value else ''
+                       for c in next(core_sheet.iter_rows(min_row=1, max_row=1))]
+            clk_col = next((i for i, h in enumerate(headers)
+                            if 'CLK_UNHALTED' in h.upper() or 'cpu utilization' in h.lower()), None)
+            core_col = next((i for i, h in enumerate(headers)
+                             if 'core' in h.lower() and 'id' in h.lower()), None)
+            if clk_col is not None:
+                core_util = {}
+                for row in core_sheet.iter_rows(min_row=2, values_only=True):
+                    cid = str(row[core_col]) if core_col is not None else '?'
+                    try:
+                        v = float(row[clk_col])
+                        core_util.setdefault(cid, []).append(v)
+                    except (TypeError, ValueError): pass
+                if core_util:
+                    core_avgs = sorted(
+                        [(c, sum(v)/len(v)) for c, v in core_util.items()],
+                        key=lambda x: x[1], reverse=True)
+                    busy = [c for c, v in core_avgs if v > 20.0]
+                    idle = [c for c, v in core_avgs if v < 5.0]
+                    print(f"\n  [Per-Core Utilization — IRQ Spread Diagnostic]")
+                    print(f"    Cores > 20% busy : {len(busy):>4}  (should be 60+ for 4-NIC full load)")
+                    print(f"    Cores < 5%  busy : {len(idle):>4}  (idle cores = IRQ not spread)")
+                    print(f"    Top 10 busiest cores: " +
+                          ", ".join(f"CPU{c}({v:.0f}%)" for c, v in core_avgs[:10]))
+        wb.close()
+    except Exception as e:
+        print(f"\n  [Per-Core parse error: {e}]")
+
+print("\nEMON metric summary written to: $OUT/emon/emon_metrics_summary.txt")
+PYEOF
+```
+
+**Key EMON thresholds for iperf3 NIC workloads (DMR-Q9UC):**
+
+| Metric | Healthy | Concern | Critical |
+|--------|---------|---------|----------|
+| `metric_core IPC` | > 0.5 | 0.2–0.5 | < 0.2 = interrupt storm |
+| `metric_CPU utilization %` | 60–90% on IRQ cores | < 30% most cores | 100% on < 20 cores |
+| `metric_core c6 residency %` | < 5% on active cores | > 30% = IRQ not spread | |
+| `metric_memory bandwidth total (MB/sec)` | ~50,000–100,000 | — | > 800,000 = DRAM saturated |
+| `metric_IO read BW (MB/sec)` (OTC) | ~50,000/NIC | Near zero = PCIe problem | |
+| `metric_IO write BW (MB/sec)` (ITC) | ~3,000–5,000 | — | |
+| `metric_IO read miss % (SCA)` | < 5% | 5–20% | > 20% = SCA thrashing |
+| `metric_IO MSI per sec` | < 500K | 500K–2M | > 2M = lower rx-usecs |
+| `metric_LLC data read MPI` | < 0.01 | 0.01–0.05 | > 0.05 = NUMA mismatch |
+| Cores > 20% busy (core view) | 60+ cores | 20–60 | < 20 = IRQ not spread |
+
+**DMR event rename warning — GNR events that do NOT exist on DMR:**
+- `UNC_IIO_DATA_REQ_OF_CPU.*` → replaced by `UNC_ITC_*` + `UNC_OTC_*`
+- `UNC_M_RPQ_INSERTS` / `UNC_M_WPQ_INSERTS` → `UNC_HAMVF_HA_IMC_READS_COUNT` / `UNC_HAMVF_HA_IMC_WRITES_COUNT.FULL`
+- `OFFCORE_REQUESTS.*` → `OFFMODULE_REQUESTS.*`
+- `RESOURCE_STALLS.*` → `BE_STALLS.*`
+
+Using GNR event names on DMR will silently collect nothing — always verify with the DMR EDP event file.
 
 ---
 
@@ -706,7 +932,7 @@ Systematic single-variable sweep revealing which conditions are needed to hit 40
 Run this group when initial results fall below the threshold — it isolates the bottleneck.
 Each subtest is 15 seconds. Total sweep runtime ≈ 4 minutes.
 
-**Run Group F EMON:** Keep perf stat running from the EMON section above throughout this group.
+**Run Group F EMON:** Keep Intel EMON running from the EMON section above throughout this group. Each config variant will be covered by the same continuous EMON trace — the EDP Excel will show metric variation across the sweep duration.
 
 ```bash
 OUT=${OUTPUT_DIR:-/tmp/iperf3_results}
@@ -980,9 +1206,16 @@ $OUT/
 │   ├── 108.007_link1_tx_p8.json
 │   ├── ...
 │   └── config_sweep/sweep_results.txt
-├── emon/                           ← perf stat (collected during all groups)
-│   ├── emon_server.txt
-│   └── emon_client.txt
+├── emon/                           ← Intel EMON raw data + EDP Excel reports
+│   ├── emon_server.dat             ← raw EMON hardware counter samples (server)
+│   ├── emon_client.dat             ← raw EMON hardware counter samples (client)
+│   ├── emon_server.xlsx            ← EDP post-processed Excel (server)
+│   ├── emon_client.xlsx            ← EDP post-processed Excel (client)
+│   ├── emon_server_collect.log
+│   ├── emon_client_collect.log
+│   ├── emon_server_mpp.log
+│   ├── emon_client_mpp.log
+│   └── emon_metrics_summary.txt    ← parsed metric summary (all domains)
 ├── monitor/                        ← telemetry snapshots (pre/post each run)
 │   ├── nic_stats_pre_server.txt    nic_stats_post_server.txt
 │   ├── nic_stats_pre_client.txt    nic_stats_post_client.txt
@@ -1014,7 +1247,7 @@ $OUT/
 | `ethtool -m` | `ethtool -m $IFACE` | NIC port temperature — flag if > 70°C | `monitor/thermal.txt` |
 | `/proc/interrupts` (pre) | `grep eth /proc/interrupts` | IRQ core distribution before test | `monitor/irq_pre_*.txt` |
 | `/proc/interrupts` (post) | same, after test | IRQ delta — verify spread across NUMA-local cores | `monitor/irq_post_*.txt` |
-| `perf stat -a` | `perf stat -a -e cycles,...` | IPC, LLC misses, cpu-migrations, softirq rate | `emon/emon_server.txt`, `emon/emon_client.txt` |
+| Intel EMON | `emon -collect-edp edp_file=...` | Full hardware counters: IPC, core freq, memory BW, PCIe IO BW, LLC miss rate, per-core utilization, TMA | `emon/emon_server.dat` + `emon_client.dat` → `emon_server.xlsx` + `emon_client.xlsx` |
 | `numastat` (pre+post) | `numastat -c` | NUMA remote-page delta — non-zero = NUMA mismatch | `monitor/numastat_pre/post.txt` |
 | `sysctl` | `sysctl net.core.rmem_max ...` | TCP buffer sizes — must be ≥ 536870912 | `sysconfig/sysctl_*.txt` |
 
@@ -1026,7 +1259,7 @@ $OUT/
 2. **Preflight Status** — PCIe Gen (PASS/FAIL), MTU per port, TCP rmem_max, IRQ affinity applied, NIC queue count, coalescing setting, iperf3 version
 3. **Monitoring Telemetry** — complete table from reference above with actual file paths in `$OUT`
 4. **Benchmark Results** — per-subtest: `subtest | mode | streams | Tx Gbps | threshold | PASS/FAIL | delta vs DMR ref`
-5. **Key Findings** — numbered list; each finding **must cite the raw file** it came from (e.g., `"cpu-migrations = 847/s from emon/emon_server.txt → IRQ affinity not applied"`)
+5. **Key Findings** — numbered list; each finding **must cite the raw file** it came from (e.g., `"metric_core IPC = 0.31 from emon/emon_server.xlsx → interrupt-dominated; raised rx-usecs coalescing to 50"`)
 6. **Raw Data Files Index** — table of every file in `$OUT/` with one-line description
 7. **Overall Verdict** — PASS / CONDITIONAL / FAIL with one-sentence justification citing the binding constraint
 
@@ -1068,15 +1301,16 @@ for path in sorted(glob.glob(f'{OUT}/bench/108.*.json')):
     print(f'| {subid} | {desc:<28} | {tx:>6.1f} | {rxcol:>6} | {thresh or \"—\":>5} | {status} |')
 "
 
-# Step 2: read key EMON signals
+# Step 2: read key EMON metrics from EDP Excel summary
 echo ""
-echo "=== EMON signals (server) ==="
-awk '
-/cpu-migrations/  { printf "cpu-migrations:  %s/interval\n", $1 }
-/context-switches/{ printf "context-switches:%s/interval\n", $1 }
-/LLC-load-misses/ { printf "LLC-load-misses: %s\n", $1 }
-/softirq_entry/   { printf "softirq-entry:   %s\n", $1 }
-' $OUT/emon/emon_server.txt 2>/dev/null | head -20
+echo "=== EMON metrics (server) — from emon_metrics_summary.txt ==="
+grep -E "metric_core IPC|metric_CPU utilization|metric_memory bandwidth total|metric_IO read BW|metric_IO MSI|metric_LLC data read MPI|Cores > 20" \
+    $OUT/emon/emon_metrics_summary.txt 2>/dev/null | head -20
+
+echo ""
+echo "=== EMON metrics (client) ==="
+grep -E "metric_core IPC|metric_CPU utilization|metric_IO read BW|Cores > 20" \
+    $OUT/emon/emon_metrics_summary.txt 2>/dev/null | grep -A5 "CLIENT" | head -15
 
 echo ""
 echo "=== NIC drop delta ==="
@@ -1139,7 +1373,7 @@ cat > $OUT/deep_dive_report.md << 'REPORT_EOF'
 | ethtool -m | ethtool -m $IFACE | NIC port temperature | monitor/thermal.txt |
 | /proc/interrupts (pre) | grep eth /proc/interrupts | IRQ distribution before | monitor/irq_pre_server.txt |
 | /proc/interrupts (post) | same, after test | IRQ spread during run | monitor/irq_post_server.txt |
-| perf stat -a | perf stat -a -e cycles,... | IPC, LLC miss, cpu-migrations, softirq rate | emon/emon_server.txt + emon_client.txt |
+| Intel EMON | emon -collect-edp edp_file=... | Full hardware PMU: IPC, freq, TMA, memory BW, IO/PCIe BW, LLC miss, per-core utilization | emon/emon_server.dat → emon_server.xlsx + emon_metrics_summary.txt |
 | numastat | numastat -c | NUMA remote-page delta | monitor/numastat_pre/post.txt |
 | sysctl | sysctl net.core.rmem_max ... | TCP buffer sysctl values | sysconfig/sysctl_server.txt |
 | python3 delta script | nic_drop_delta | rx_discards delta | monitor/nic_drop_delta.txt |
@@ -1148,11 +1382,19 @@ cat > $OUT/deep_dive_report.md << 'REPORT_EOF'
 
 | Metric | Server | Client | Expected | Status |
 |---|---|---|---|---|
-| IPC (system-wide) | [from emon_server.txt] | [from emon_client.txt] | > 0.5 for NIC workloads | — |
-| cpu-migrations/interval | [from emon_server.txt] | [from emon_client.txt] | < 100 per 5s interval | — |
-| context-switches/interval | [from emon_server.txt] | [from emon_client.txt] | < 3,000 per 5s interval | — |
-| LLC-load-misses | [from emon_server.txt] | [from emon_client.txt] | low = buffers in L3 | — |
-| NIC rx_discards delta | [from nic_drop_delta.txt] | [from nic_drop_delta.txt] | 0 (any value = ring overflow) | — |
+| `metric_core IPC` | [from emon_server.xlsx] | [from emon_client.xlsx] | > 0.5 for NIC workloads | — |
+| `metric_CPU utilization %` | [from emon_server.xlsx] | [from emon_client.xlsx] | 60–90% on IRQ cores | — |
+| `metric_core c6 residency %` | [from emon_server.xlsx] | [from emon_client.xlsx] | < 5% on active cores | — |
+| `metric_memory bandwidth total (MB/sec)` | [from emon_server.xlsx] | [from emon_client.xlsx] | ~50K–100K (never bottleneck) | — |
+| `metric_IO read BW (MB/sec)` (OTC) | [from emon_server.xlsx] | — | ~50K/NIC at 400G | — |
+| `metric_IO write BW (MB/sec)` (ITC) | [from emon_server.xlsx] | — | ~3K–5K (4B granularity) | — |
+| `metric_IO read miss % (SCA)` | [from emon_server.xlsx] | — | < 5% | — |
+| `metric_IO MSI per sec` | [from emon_server.xlsx] | — | < 500K | — |
+| `metric_LLC data read MPI` | [from emon_server.xlsx] | [from emon_client.xlsx] | < 0.01 for NIC buffers in L3 | — |
+| `metric_TMA_Backend_Bound(%)` | [from emon_server.xlsx] | [from emon_client.xlsx] | — | — |
+| `metric_TMA_Memory_Bound(%)` | [from emon_server.xlsx] | [from emon_client.xlsx] | Low — not DRAM bound | — |
+| Cores > 20% busy (core view) | [from emon_server.xlsx] | [from emon_client.xlsx] | 60+ for 4-NIC full load | — |
+| NIC rx_discards delta | [from nic_drop_delta.txt] | [from nic_drop_delta.txt] | 0 | — |
 | NIC port temperature | [from thermal.txt] | — | < 70°C | — |
 | NUMA remote hits delta | [numastat_post - numastat_pre] | — | 0 | — |
 
@@ -1169,10 +1411,13 @@ cat > $OUT/deep_dive_report.md << 'REPORT_EOF'
 [Numbered list — each finding MUST cite the raw file it came from]
 
 1. [example: "PCIe speed = 64 GT/s (Gen6) confirmed — from sysconfig/pcie_state_server.txt. Not the bottleneck."]
-2. [example: "cpu-migrations = 847/interval in emon/emon_server.txt → IRQ affinity not applied; run set_aff_perf.sh"]
-3. [example: "NIC rx_discards delta = 0 in monitor/nic_drop_delta.txt → ring buffer size adequate"]
-4. [example: "NUMA remote hits delta = 0 — NIC DMA and IRQ handlers on same NUMA node"]
-5. [example: "Throughput stable t=0 to t=60s in Group E — no thermal sag — from bench/108.023*.json intervals"]
+2. [example: "metric_core IPC = 0.31 (server) from emon/emon_server.xlsx — below 0.5 = interrupt-dominated; IRQ coalescing rx-usecs raised to 50 as fix."]
+3. [example: "metric_IO read BW (OTC) = 48,200 MB/s at 400G — within expected range; PCIe not saturated."]
+4. [example: "Cores > 20% busy = 14 from emon/emon_server.xlsx core view — IRQ not spread; set_aff_perf.sh applied, re-run shows 72 cores active."]
+5. [example: "metric_memory bandwidth total = 63,000 MB/s — 6% of DMR 1 TB/s peak; DRAM is not the bottleneck."]
+6. [example: "NIC rx_discards delta = 0 in monitor/nic_drop_delta.txt → ring buffer adequate."]
+7. [example: "NUMA remote hits delta = 0 — NIC DMA and IRQ handlers on same NUMA node."]
+8. [example: "Throughput stable t=0 to t=60s in Group E — no thermal sag — from bench/108.023*.json intervals."]
 
 ---
 
@@ -1194,8 +1439,11 @@ cat > $OUT/deep_dive_report.md << 'REPORT_EOF'
 | monitor/thermal.txt | NIC port temperature readings |
 | monitor/numastat_pre.txt | numastat baseline before tests |
 | monitor/numastat_post.txt | numastat after tests (delta should be 0) |
-| emon/emon_server.txt | perf stat intervals from server side |
-| emon/emon_client.txt | perf stat intervals from client side |
+| emon/emon_server.dat | Raw Intel EMON hardware counter samples (server) |
+| emon/emon_client.dat | Raw Intel EMON hardware counter samples (client) |
+| emon/emon_server.xlsx | EDP post-processed Excel — all metric groups (server) |
+| emon/emon_client.xlsx | EDP post-processed Excel — all metric groups (client) |
+| emon/emon_metrics_summary.txt | Parsed text summary of all EDP metric groups |
 | bench/108.XXX_*.json | iperf3 --json results per subtest |
 | bench/config_sweep/sweep_results.txt | Group F config sweep table |
 
@@ -1218,6 +1466,33 @@ on eth3/eth4 and re-run Group B."
 "FAIL — Both links at 28 Gbps. PCIe LnkSta shows Speed 2.5GT/s (downgraded) in
 sysconfig/pcie_state_server.txt. Root cause: thermal crash locked Gen1. Action: BMC cold
 power cycle required. No other tuning is meaningful until PCIe is restored."
+
+---
+
+## 8. Best Configuration Achieving Ideal Bandwidth
+
+[Fill in from config_sweep/sweep_results.txt and bench/*.json — identify the specific
+ iperf3 + system config that reached the highest throughput ≥ 390 Gbps per link]
+
+| Parameter | Value | Source |
+|---|---|---|
+| iperf3 streams (-P) | [e.g. 16] | bench/config_sweep/sweep_results.txt |
+| TCP window (-w) | [e.g. 256m] | bench/config_sweep/sweep_results.txt |
+| CCA | [e.g. cubic] | bench/config_sweep/sweep_results.txt |
+| IRQ affinity | [applied / not applied] | sysconfig/irq_affinity_server.txt |
+| IRQ coalescing rx-usecs | [e.g. 50] | sysconfig/nic_config_server.txt |
+| NIC ring size (rx/tx) | [e.g. 8192] | sysconfig/nic_config_server.txt |
+| MTU | [e.g. 9000] | sysconfig/nic_config_server.txt |
+| TCP rmem/wmem_max | [e.g. 134217728] | sysconfig/sysctl_server.txt |
+| **Best throughput achieved** | **[X.X Gbps — % of 400G line rate]** | bench/108.XXX_*.json |
+| EMON IPC at best config | [from emon_server.xlsx] | emon/emon_metrics_summary.txt |
+| EMON IO read BW at best | [from emon_server.xlsx] | emon/emon_metrics_summary.txt |
+| Active cores at best config | [from emon_server.xlsx core view] | emon/emon_metrics_summary.txt |
+
+**Reproducibility command** (exact iperf3 client command that produced best result):
+\`\`\`bash
+[paste exact iperf3 command here — from bench/config_sweep/sweep_results.txt]
+\`\`\`
 REPORT_EOF
 echo "deep_dive_report.md written to $OUT/"
 ```
@@ -1352,7 +1627,7 @@ done
 
 ### Issue: IRQ affinity not pinned — SEVERITY: MEDIUM
 **Assessment:** `monitor/irq_post_server.txt` shows NIC IRQs spread to non-NUMA-local
-cores, OR `emon/emon_server.txt` shows cpu-migrations > 500/interval.
+cores, OR `emon/emon_server.xlsx` core view shows fewer than 20 cores > 20% busy (IRQ concentrated).
 For a 2-socket system: CX8 #1 (socket 0) → cores 0–79; CX8 #2 (socket 1) → cores 80–159.
 Cross-socket assignment adds ~40ns/cache-line latency for every DMA buffer transferred.
 **Root cause:** `irqbalance` running and reassigning NIC IRQs at runtime.
