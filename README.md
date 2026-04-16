@@ -33,8 +33,8 @@ If you haven't set these up yet:
 
 1. Download and install [Visual Studio Code](https://code.visualstudio.com/)
 2. Open VS Code, go to the **Extensions** sidebar (`Ctrl+Shift+X`), and install:
-   - **GitHub Copilot**
-   - **GitHub Copilot Chat**
+   - **GitHub Copilot** — AI completions + Copilot CLI support
+   - **GitHub Copilot Chat** — provides the Chat view where Copilot CLI sessions run
 3. Sign in with your GitHub account when prompted
 
 ---
@@ -70,25 +70,44 @@ To make these permanent across sessions, add them to `~/.bashrc` or `/etc/enviro
 
 ---
 
-### Step 5 — Clone this repo and open it as your workspace
+### Step 5 — Choose a working directory, clone the repo, and open your workspace
 
-Once VS Code is connected to the right machine, open a terminal in VS Code (`Ctrl+\``) and run:
+Pick a root working directory on your target machine — somewhere convenient for storing benchmark results, packages, and data files. Your home directory (`~`) is a good default; you can also use a dedicated folder like `/data/benchmarks` or `/workspace`.
+
+Open a terminal in VS Code (`Ctrl+\``) and clone the repo into that directory:
 
 ```bash
+cd ~    # or wherever your working directory is
 git clone https://github.com/meha-v-intel/platform-benchmark-skills.git
-cd platform-benchmark-skills
-git checkout rack-skills
+cd platform-benchmark-skills && git checkout rack-skills && cd ..
 ```
 
-Then in VS Code go to **File → Open Folder** and select the `platform-benchmark-skills` folder.
+Then in VS Code go to **File → Open Folder** and open your **working directory** (e.g. `~`) — not the repo subfolder itself.
 
-This opens the repo as your **[VS Code workspace](https://code.visualstudio.com/docs/editing/workspaces/workspaces)**. Copilot automatically discovers all the skill files inside `.github/skills/` and knows how to set up Slurm, run benchmarks, and collect EMON traces on your system.
+This opens your working directory as a **[VS Code workspace](https://code.visualstudio.com/docs/editing/workspaces/workspaces)**. Copilot CLI will automatically discover the skill files inside `platform-benchmark-skills/.github/skills/` — the repo just needs to exist somewhere within the opened workspace folder.
+
+> **Why not open the repo folder directly?**  
+> Opening a broader working directory lets you access benchmark results, package builds, and other files alongside the skills repo from one VS Code window. Copilot CLI can still find the skills regardless.
 
 ---
 
-### Step 6 — Ask Copilot to get to work
+### Step 6 — Start a Copilot CLI session and get to work
 
-Open **GitHub Copilot Chat** (`Ctrl+Shift+I`) and type in plain English — no commands needed:
+The skills are driven by **GitHub Copilot CLI** — an autonomous agent that runs commands in your terminal, interprets results, and iterates, all without you writing individual commands.
+
+**No separate install needed.** VS Code automatically installs and configures Copilot CLI when you have the GitHub Copilot extension.
+
+→ Full guide: [Copilot CLI sessions in VS Code](https://code.visualstudio.com/docs/copilot/agents/copilot-cli)
+
+**To open a Copilot CLI session**, use any of these options:
+
+- Open the Chat view (`Ctrl+Alt+I`) → click the **Session Target** dropdown → select **Copilot CLI**
+- Command Palette (`Ctrl+Shift+P`) → **Chat: New Copilot CLI Session**
+- Type `copilot` directly in VS Code's integrated terminal
+
+When prompted to choose an isolation mode, select **Workspace isolation** so the agent can run commands and access files directly in your workspace.
+
+Then describe what you want in plain English:
 
 ```
 install and configure Slurm on this system
@@ -97,7 +116,7 @@ run all platform benchmarks and give me a summary
 collect EMON traces while running the memory bandwidth benchmark
 ```
 
-Copilot uses the **[Copilot CLI agent](https://code.visualstudio.com/docs/copilot/agents/copilot-cli)** within your workspace to discover your system's configuration and execute the correct commands automatically.
+Copilot CLI reads the skill files, discovers your system's configuration, and runs the correct commands automatically. You do not need to know the individual commands.
 
 ---
 
