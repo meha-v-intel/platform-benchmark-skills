@@ -9,6 +9,98 @@
 
 ---
 
+## Setup Guide
+
+> **New to VS Code or GitHub Copilot?** This section walks you through everything you need — from installing VS Code to asking Copilot to run your first benchmark.
+
+### Step 1 — Decide where to run your benchmarks
+
+The benchmarks in this repo run **directly on the target system** (e.g. a DMR server or lab machine). Before cloning anything, decide which machine will actually run them:
+
+| Your situation | What to do |
+|---|---|
+| **Benchmarking your local machine** | Clone this repo to your local machine, then open it in VS Code there |
+| **Benchmarking a remote server or lab system** | Use VS Code Remote SSH to connect to that server first, then clone and open the repo there |
+
+> **Why does this matter?**  
+> GitHub Copilot runs commands inside VS Code's integrated terminal — on whichever machine VS Code is connected to. If VS Code is open on your laptop but the benchmark target is a remote server, Copilot would need a separate SSH login for every command it runs. The correct setup is to open VS Code **directly on the target machine** so Copilot's terminal is already there.
+
+---
+
+### Step 2 — Install VS Code and GitHub Copilot
+
+If you haven't set these up yet:
+
+1. Download and install [Visual Studio Code](https://code.visualstudio.com/)
+2. Open VS Code, go to the **Extensions** sidebar (`Ctrl+Shift+X`), and install:
+   - **GitHub Copilot**
+   - **GitHub Copilot Chat**
+3. Sign in with your GitHub account when prompted
+
+---
+
+### Step 3 — (Remote benchmarking only) Connect VS Code to your benchmark server via SSH
+
+If your benchmark target is a remote server or lab system, do this before cloning the repo:
+
+1. In VS Code's Extensions sidebar, install **Remote - SSH**
+2. Open the Command Palette (`Ctrl+Shift+P`) and run **Remote-SSH: Connect to Host...**
+3. Enter your server's address (e.g. `user@myserver.intel.com`)
+4. VS Code will reconnect — the status bar at the bottom-left will show the remote host name
+
+→ Full guide: [VS Code Remote Development using SSH](https://code.visualstudio.com/docs/remote/ssh)
+
+> After connecting remotely, all terminals, file edits, and Copilot commands run on the remote server — not your laptop. This is exactly what you want for benchmarking.
+
+---
+
+### Step 4 — (Intel network users) Set proxies before installing anything
+
+If you are on Intel's corporate network, package downloads (`dnf`, `pip`, `cargo`, `git clone`, etc.) may be blocked without proxy settings. Run the following **before cloning the repo or installing any tools**:
+
+```bash
+export ftp_proxy=http://proxy-dmz.intel.com:911
+export http_proxy=http://proxy-us.intel.com:911
+export https_proxy=http://proxy-us.intel.com:912
+export no_proxy=134.134.0.0/16,192.168.0.0/16,172.16.0.0/12,10.0.0.0/8,localhost,.local,10.54.27.105,10.96.0.0/12,10.54.27.55,172.25.226.133,intel.com,.intel.com,10.244.0.0/16,10.96.0.1,127.0.0.0/8,10.54.27.19
+export socks_proxy=http://proxy-dmz.intel.com:1080
+```
+
+To make these permanent across sessions, add them to `~/.bashrc` or `/etc/environment`.
+
+---
+
+### Step 5 — Clone this repo and open it as your workspace
+
+Once you are connected to the right machine (local or remote), open a terminal in VS Code (`Ctrl+\``) and run:
+
+```bash
+git clone https://github.com/meha-v-intel/platform-benchmark-skills.git
+cd platform-benchmark-skills
+git checkout storage-skills
+```
+
+Then in VS Code go to **File → Open Folder** and select the `platform-benchmark-skills` folder.
+
+This opens the repo as your **[VS Code workspace](https://code.visualstudio.com/docs/editing/workspaces/workspaces)**. Copilot automatically discovers all the skill files inside `.github/skills/` and learns how to run the storage segment validation workloads on your system.
+
+---
+
+### Step 6 — Ask Copilot to run benchmarks
+
+Open **GitHub Copilot Chat** (`Ctrl+Shift+I`) and type in plain English — no commands needed:
+
+```
+run the iperf3 benchmark between S1 and S2 and give me per-port throughput
+run the FIO benchmark on the NVMe and tell me if the result looks normal
+benchmark AES-256-GCM encryption and confirm AES-NI is active
+run the full erasure coding benchmark with ISA-L
+```
+
+Copilot uses the **[Copilot CLI agent](https://code.visualstudio.com/docs/copilot/agents/copilot-cli)** within your workspace to figure out your system's configuration and execute the correct commands automatically. You do not need to know the individual commands — just describe what you want.
+
+---
+
 ## Overview
 
 This branch contains **13 Copilot CLI skills** covering Intel Storage Segment Validation Tests 101–117.
