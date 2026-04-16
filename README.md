@@ -98,7 +98,7 @@ The benchmarks are driven by **GitHub Copilot CLI** — an autonomous agent that
 **To open a Copilot CLI session**, use any of these options:
 
 - Open the Chat view (`Ctrl+Alt+I`) → click the **Session Target** dropdown → select **Copilot CLI**
-- Command Palette (`Ctrl+Shift+P`) → **Chat: New Copilot CLI Session**
+- Command Palette (`Ctrl+Shift+P`) → **Chat: New Copilot CLI Session** (select the github.copilot.cli.newSession option)
 - Type `copilot` directly in VS Code's integrated terminal
 
 When prompted to choose an isolation mode, select **Workspace isolation** so the agent can run commands and access files directly in your workspace.
