@@ -1,41 +1,50 @@
 ---
 name: emon-collect
-description: "Collect EMON hardware counter data in parallel with any user workload, save as a raw .dat file, and post-process to an Excel EDP report (.xlsx). Use when: running EMON alongside a workload, profiling a workload with hardware counters, collecting EMON while a benchmark runs, capturing CPU performance metrics during any job, recording EMON to .dat file, converting EMON .dat to xlsx, post-processing existing EMON .dat file, attaching EMON collection to an existing command."
-argument-hint: "[collect|postprocess]"
+description: "Collect EMON hardware counter data in parallel with any workload, generate workload sweep scripts with simultaneous EMON collection, post-process .dat files to Excel EDP reports (.xlsx), and investigate hardware-level anomalies. Use when: running EMON alongside a workload, profiling any benchmark with hardware counters, collecting EMON while a job runs, recording EMON to .dat file, converting EMON .dat to xlsx, sweeping workload configurations with EMON collection, generating a parameter sweep script with EMON, post-processing existing EMON .dat files, debugging low throughput or anomalies with hardware counters, iterating hypotheses using EMON signals."
+argument-hint: "[collect|sweep|postprocess]"
 allowed-tools: Bash
 ---
 
-# EMON Collect — Parallel EMON Collection for Any Workload
+# EMON Collect — Parallel EMON Collection, Sweep Scripts, and Post-Processing
 
-Teaches Copilot how to wrap **any user-provided workload command** with EMON
-hardware counter collection running in the background, save the raw output to a
-`.dat` file, and post-process it to an Excel EDP report via `mpp.py`.
+# EMON Collect — Parallel EMON Collection, Sweep Scripts, and Post-Processing
 
-Use `$ARGUMENTS` to select mode:
-- `collect` — set up prerequisites, run workload + EMON, produce `.dat`
-- `postprocess` — post-process an existing `.dat` to `.xlsx`
-- *(blank)* — full flow: collect then post-process
+Teaches Copilot how to handle **any EMON collection request**:
+
+| Mode | `$ARGUMENTS` | When to use |
+|------|-------------|-------------|
+| **Single collect** | `collect` or blank | One workload command, wrap with EMON, get `.dat` + `.xlsx` |
+| **Sweep** | `sweep` | Multiple configs / parameter permutations — generate a sweep script with EMON at each config |
+| **Post-process** | `postprocess` | Re-run `mpp.py` on existing `.dat` files → `.xlsx` |
+
+If the user doesn't specify, ask: "Do you want to collect EMON for a single run, generate a sweep script across multiple configurations, or post-process existing .dat files?"
 
 ---
 
-## Phase 0 — Understand the user's workload
+## Phase 0 — Understand the request
 
-Before doing anything, ask the user for:
+### For single-run collection (`collect`)
 
-1. **Workload command** — the exact shell command (or script path) to run. This
-   runs in the **foreground**; EMON collects in the **background** during its
-   execution.
-2. **Run label** — a short name used for output file naming (default: derive
-   from the binary name, e.g. `mlc`, `iperf3`, `llama-bench`).
-3. **Output directory** — where to save `.dat`, logs, and `.xlsx` (default:
-   `~/emon_<label>_<timestamp>/`). Must be writable.
-4. **Warm-up needed?** — should the workload run once without EMON first to
-   warm up caches/JIT before the measured run? (default: no)
-5. **Run count** — how many timed EMON+workload runs to do (default: 1). If >1,
-   each run gets its own `.dat` and `.xlsx`.
+Ask the user:
 
-Do **not** assume any of these values. Collect them interactively before
-proceeding.
+1. **Workload command** — the exact shell command or script path. Runs in the **foreground**; EMON collects in the **background**.
+2. **Run label** — short name for output files (default: derive from binary name).
+3. **Output directory** — where to save `.dat`, logs, `.xlsx` (default: `~/emon_<label>_<timestamp>/`).
+4. **Warm-up needed?** — run once without EMON first? (default: no)
+5. **Run count** — how many EMON+workload runs? (default: 1)
+
+### For sweep script generation (`sweep`)
+
+Ask the user:
+
+1. **Workload binary/command** — what base command runs the workload?
+2. **Configuration dimensions** — what parameters vary? (e.g. thread count, batch size, precision, input size)
+3. **Values per dimension** — what are the values to sweep for each?
+4. **Baseline config** — when sweeping one dimension, what fixed values are used for the others?
+5. **Run repetitions per config** — default 3.
+6. **Output directory** — where to store results.
+
+Do **not** assume any values. Collect them before proceeding.
 
 ---
 
@@ -408,3 +417,335 @@ python3 "$MPP_PY" -i "$DAT" -m "$EDP_METRIC" -f "$EDP_FORMAT" \
 
 unzip -t "$XLSX" >/dev/null 2>&1 && echo "Excel OK: $XLSX" || echo "mpp.py failed"
 ```
+
+---
+
+## Phase 9 — Sweep script generation
+
+When the user wants to sweep a workload across multiple configurations with EMON
+at each one, generate a self-contained bash script. Ask for the workload details
+(Phase 0 → sweep), then produce a script following this structure.
+
+### 9.1 — Sweep directory structure
+
+```bash
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RESULTS_DIR="/root/<workload_name>_emon_sweep_${TIMESTAMP}"
+mkdir -p "$RESULTS_DIR"/{emon_data,workload_logs,postprocess,summary}
+```
+
+```
+$RESULTS_DIR/
+├── emon_data/       # raw .dat files + emon console logs
+├── workload_logs/   # stdout/stderr from each workload run
+├── postprocess/     # .xlsx EDP reports + mpp.py logs
+└── summary/         # human-readable sweep summary
+```
+
+### 9.2 — The run_config function
+
+Every configuration calls this function. It wraps the core collect pattern
+(Phase 3) into a reusable unit:
+
+```bash
+run_config() {
+    local config_name="$1"   # unique label for this config, e.g. "threads-8_batch-32"
+    shift
+    local workload_cmd="$@"  # full workload command for this config
+
+    local dat_file="${RESULTS_DIR}/emon_data/${config_name}.dat"
+    local xlsx_file="${RESULTS_DIR}/postprocess/${config_name}.xlsx"
+    local workload_log="${RESULTS_DIR}/workload_logs/${config_name}.log"
+    local emon_log="${RESULTS_DIR}/emon_data/${config_name}_emon.log"
+    local mpp_log="${RESULTS_DIR}/postprocess/${config_name}_mpp.log"
+
+    echo ""
+    echo "=== Config: $config_name ==="
+
+    # Start EMON
+    emon -collect-edp edp_file="$EDP_EVENTS" -f "$dat_file" > "$emon_log" 2>&1 &
+    EMON_PID=$!
+    sleep 5
+
+    if ! kill -0 $EMON_PID 2>/dev/null; then
+        echo "EMON failed for $config_name — skipping"
+        cat "$emon_log"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+        return 1
+    fi
+
+    # Run workload
+    eval "$workload_cmd" > "$workload_log" 2>&1
+    WORKLOAD_EXIT=$?
+
+    # Stop EMON cleanly
+    emon -stop >> "$emon_log" 2>&1
+    wait $EMON_PID 2>/dev/null || true
+    sleep 2
+
+    # Validate .dat
+    if [ ! -f "$dat_file" ] || [ ! -s "$dat_file" ]; then
+        echo "ERROR: $dat_file missing or empty"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+        return 1
+    fi
+    echo "DAT: $(wc -l < "$dat_file") lines, $(du -h "$dat_file" | cut -f1)"
+
+    # Post-process
+    python3 "$MPP_PY" \
+        -i  "$dat_file" \
+        -m  "$EDP_METRIC" \
+        -f  "$EDP_FORMAT" \
+        -o  "$xlsx_file" \
+        --socket-view --core-view --thread-view --uncore-view \
+        -p  8 \
+        > "$mpp_log" 2>&1
+
+    if [ -f "$xlsx_file" ] && unzip -t "$xlsx_file" >/dev/null 2>&1; then
+        echo "Excel: $(du -h "$xlsx_file" | cut -f1) — OK"
+        COMPLETED_TESTS=$((COMPLETED_TESTS + 1))
+    else
+        echo "mpp.py failed for $config_name — see $mpp_log"
+        tail -10 "$mpp_log"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
+}
+```
+
+> **Do not use `set -e`** in sweep scripts. Individual config failures must not
+> abort the whole sweep — failed configs are counted and the sweep continues.
+
+### 9.3 — One-at-a-time dimension sweep pattern
+
+Recommended default: hold all dimensions at baseline, sweep one at a time.
+This gives N+M tests (tractable) instead of a full N×M×... Cartesian product,
+and isolates each dimension's effect cleanly.
+
+```bash
+# Define sweep dimensions and values
+DIM1_VALUES=(val_a val_b val_c)
+DIM2_VALUES=(val_x val_y val_z)
+BASELINE_DIM1=val_b   # used when sweeping dim2
+BASELINE_DIM2=val_x   # used when sweeping dim1
+
+TOTAL_TESTS=$(( ${#DIM1_VALUES[@]} + ${#DIM2_VALUES[@]} ))
+COMPLETED_TESTS=0
+FAILED_TESTS=0
+START_TIME=$(date +%s)
+
+# Phase 1: Sweep dim1, hold dim2 at baseline
+echo "=== Phase 1: DIM1 Sweep ==="
+for v1 in "${DIM1_VALUES[@]}"; do
+    config_name="${WORKLOAD_NAME}_dim1-${v1}_dim2-${BASELINE_DIM2}"
+    run_config "$config_name" <workload_cmd --dim1 $v1 --dim2 $BASELINE_DIM2>
+done
+
+# Phase 2: Sweep dim2, hold dim1 at baseline
+echo "=== Phase 2: DIM2 Sweep ==="
+for v2 in "${DIM2_VALUES[@]}"; do
+    config_name="${WORKLOAD_NAME}_dim1-${BASELINE_DIM1}_dim2-${v2}"
+    run_config "$config_name" <workload_cmd --dim1 $BASELINE_DIM1 --dim2 $v2>
+done
+```
+
+### 9.4 — Config naming convention
+
+```bash
+# Encode every varying parameter into the config name — this is the filename stem
+config_name="${workload_name}_dim1-${v1}_dim2-${v2}_rep${rep}"
+# → emon_data/myworkload_threads-8_batch-32_rep1.dat
+# → postprocess/myworkload_threads-8_batch-32_rep1.xlsx
+```
+
+Keep names filesystem-safe: use `-` within a dimension value, `_` between dimensions.
+
+### 9.5 — Multiple repetitions per config
+
+If the user wants N repetitions per configuration:
+
+```bash
+NUM_REPS=3
+for v in "${DIM1_VALUES[@]}"; do
+    for rep in $(seq 1 $NUM_REPS); do
+        config_name="${WORKLOAD_NAME}_dim1-${v}_rep${rep}"
+        run_config "$config_name" <workload_cmd --dim1 $v>
+    done
+done
+```
+
+### 9.6 — Sweep summary report
+
+After all configs complete:
+
+```bash
+END_TIME=$(date +%s)
+TOTAL_DURATION=$((END_TIME - START_TIME))
+SUMMARY="$RESULTS_DIR/summary/sweep_summary.txt"
+
+cat > "$SUMMARY" << EOF
+Workload EMON Sweep Summary
+===========================
+Timestamp  : $TIMESTAMP
+Platform   : $(lscpu | grep "Model name" | cut -d: -f2 | xargs)
+Workload   : $WORKLOAD_NAME
+Total tests: $TOTAL_TESTS
+Completed  : $COMPLETED_TESTS
+Failed     : $FAILED_TESTS
+Duration   : ${TOTAL_DURATION}s
+
+DAT files:
+$(ls -lh "${RESULTS_DIR}/emon_data/"*.dat 2>/dev/null | awk '{print $9, $5}')
+
+Excel files:
+$(ls -lh "${RESULTS_DIR}/postprocess/"*.xlsx 2>/dev/null | awk '{print $9, $5}')
+
+Next steps:
+  1. Open xlsx files in Excel/LibreOffice for EDP metric dashboards
+  2. Compare workload performance across configs in workload_logs/
+  3. Correlate EMON metrics (IPC, memory BW, LLC miss rate) with performance
+  4. Low IPC + high LLC miss → memory bound; low IPC + high BE stalls → backend bound
+EOF
+
+cat "$SUMMARY"
+```
+
+### 9.7 — Full sweep script layout
+
+When generating a sweep script, follow this order:
+
+```
+1.  #!/usr/bin/env bash  (no set -e)
+2.  source /opt/intel/sep/sep_vars.sh
+3.  EDP path definitions
+4.  WORKLOAD_NAME + TIMESTAMP + RESULTS_DIR creation
+5.  Sweep dimension arrays + baseline values
+6.  Prerequisite checks (binary exists, EDP files exist, emon in PATH)
+7.  SEP driver check + insmod-sep if needed
+8.  run_config() function
+9.  Counter init: TOTAL_TESTS, COMPLETED_TESTS, FAILED_TESTS, START_TIME
+10. One for-loop per sweep phase
+11. Summary report
+```
+
+Running the generated script:
+```bash
+chmod +x <sweep_script>.sh
+sudo ./<sweep_script>.sh 2>&1 | tee sweep_run.log
+```
+
+Must run as root — EMON needs kernel driver access.
+
+Monitor live:
+```bash
+# In a second terminal
+watch -n 5 'ls -lh <RESULTS_DIR>/emon_data/*.dat 2>/dev/null | tail -5'
+```
+
+---
+
+## Phase 10 — Anomaly investigation with EMON
+
+When EMON is being used to debug unexpected behavior (low throughput, imbalanced
+load, degradation over time), use this investigation loop:
+
+```
+Observe anomaly
+      ↓
+Collect EMON during anomalous run + a known-good run for comparison
+      ↓
+Identify which metric deviates from expected
+      ↓
+Form a specific, falsifiable hypothesis about root cause
+      ↓
+Design a targeted config change that isolates that variable
+      ↓
+Re-run with EMON → compare results
+      ↓
+Refine understanding → next hypothesis or declare root cause understood
+```
+
+**Never skip to config changes before collecting EMON.** Hardware always tells
+the truth. Intuition about where the bottleneck is will often be wrong.
+
+### 10.1 — Reading the Excel output: tab order
+
+Open the post-processed xlsx in this order:
+
+1. **Summary → IPC** — if IPC < 0.5 the CPU is interrupt- or stall-dominated; fix that first
+2. **Core view → CPU_CLK_UNHALTED heatmap** — which cores are actually doing work? Concentrated = IRQ affinity wrong
+3. **Uncore view → IO BW** — near-zero IO BW = NIC/PCIe problem (not CPU); elevated SCA miss = data not cached
+4. **Uncore view → Memory controller** — per-channel imbalance = NUMA mismatch
+5. **Core view → interval over time** — IPC drop mid-run = thermal throttle or queue starvation
+
+### 10.2 — The diff approach
+
+The most powerful technique is comparing two EMON traces — one known-good, one
+anomalous. The metric delta isolates the effect of exactly one config change:
+
+```bash
+# Collect known-good baseline
+emon ... -f baseline_good.dat &; sleep 5
+<workload with known-good config> > baseline_good_workload.log 2>&1
+emon -stop; sleep 2
+python3 "$MPP_PY" -i baseline_good.dat ... -o baseline_good.xlsx
+
+# Remove one variable, collect again
+emon ... -f test_no_irq_affinity.dat &; sleep 5
+<same workload, one thing changed> > test_no_irq_affinity_workload.log 2>&1
+emon -stop; sleep 2
+python3 "$MPP_PY" -i test_no_irq_affinity.dat ... -o test_no_irq_affinity.xlsx
+
+# Open both xlsx → compare IPC, CLK_UNHALTED distribution, IIO BW
+# The delta IS the effect of that one config change
+```
+
+### 10.3 — Common hardware-level anomaly signatures
+
+| Anomaly | EMON signal to check | Likely root cause |
+|---------|---------------------|-------------------|
+| Much lower throughput than expected | `metric_IO read/write BW` near-zero | PCIe link speed downgrade (check `lspci LnkSta`) |
+| Uneven per-core CPU load | Per-core `CPU_CLK_UNHALTED` variance | IRQ affinity not set; interrupts landing on one core |
+| Throughput OK but spiky | IPC dropping mid-interval; LLC miss rate rising | Thermal throttle; check `dmesg | grep temp` |
+| Cross-socket IO | IO BW on socket 0 + IMC activity on socket 1 | NUMA mismatch; NIC DMA crossing NUMA boundary |
+| Low IPC (< 0.5) under network workload | `TOPDOWN.BACKEND_BOUND_SLOTS` + `CYCLE_ACTIVITY.STALLS_L3_MISS` | Memory-latency stalls; IRQ storm consuming all cycles |
+| mpp.py empty sheets | Near-zero sample count in .dat | EDP events file wrong platform; driver unloaded mid-run |
+
+### 10.4 — DMR-specific event rename notes
+
+On DMR (PantherCove/DiamondRapids), several GNR-era event names were renamed.
+Using old names silently collects nothing:
+
+| GNR name | DMR replacement |
+|----------|----------------|
+| `UNC_IIO_DATA_REQ_OF_CPU.*` | `UNC_ITC_*` (writes) + `UNC_OTC_*` (reads) |
+| `RESOURCE_STALLS.*` | `BE_STALLS.*` |
+| `IDQ_UOPS_NOT_DELIVERED.CORE` | `IDQ_BUBBLES.CORE` |
+| `OFFCORE_REQUESTS.*` | `OFFMODULE_REQUESTS.*` |
+| `OFFCORE_RESPONSE.*` | `OMR.*` |
+| `UNC_M_RPQ_INSERTS` | `UNC_HAMVF_HA_IMC_READS_COUNT` |
+| `UNC_M_WPQ_INSERTS` | `UNC_HAMVF_HA_IMC_WRITES_COUNT.FULL` |
+
+Also note: DMR `UNC_ITC_*` writes use **4B granularity**; `UNC_OTC_*` reads use
+**64B granularity**. Do not compare them directly or the write BW will appear
+16× higher than it is.
+
+---
+
+## Key rules (always follow)
+
+1. **`-f <dat_file>`** — always use this flag for raw EMON data; never redirect stdout to `.dat`
+2. **`emon -stop`** — always stop with this command; never `kill $EMON_PID`
+3. **5s sleep** after starting EMON, before launching the workload
+4. **2s sleep** after `emon -stop`, before running `mpp.py`
+5. **Validate both** the `.dat` (non-empty) and the `.xlsx` (`unzip -t`) after every run
+6. **No `set -e`** in sweep scripts — per-config failures must not abort the sweep
+7. **Root required** — EMON needs SEP kernel driver access (`sudo` or run as root)
+8. **Source `sep_vars.sh` first** — always, every session
+
+Investigation rules:
+9. Collect EMON before changing config — let hardware signals drive the hypothesis
+10. Always collect a known-good trace for diff comparison
+11. Change exactly one variable per test
+12. Start with IPC — if low, fix interrupt handling before anything else
+13. Near-zero IO BW = PCIe/NIC problem; check uncore view first
+14. Cross-tab: core view → IRQ/NUMA diagnosis; uncore view → PCIe/memory diagnosis
