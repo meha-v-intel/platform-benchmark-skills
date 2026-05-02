@@ -51,6 +51,8 @@ perf stat -e dTLB-loads,dTLB-load-misses,iTLB-loads,iTLB-load-misses,\
 branch-misses,branches ./BINARY
 
 # Pass 3 — CYCLE_ACTIVITY (stall decomposition)
+# For ADDITIVE WALL-CLOCK decomposition, use the canonical method in the
+# "Additive Wall-Clock Time Decomposition" section below instead of this pass.
 perf stat -e r0ca3,r04a3,r08a3 ./BINARY
 # r0ca3 = CYCLES_L1D_PENDING (all memory stalls)
 # r04a3 = CYCLES_L2_PENDING
@@ -303,11 +305,165 @@ higher despite lower IPC.
 
 ---
 
-## Session 2026-04-24 — Additive Time Budget (Final Reference)
+## Additive Wall-Clock Time Decomposition (Canonical Method)
 
-### Starting point for next session
-Reference file: `profile_results/bump_compare/time_budget_final.txt`
-Checkpoint: `session-state/e801f22e-.../checkpoints/003-additive-time-budget-final.md`
+This is the **primary method** for "additive time analysis" on any single-threaded
+workload. It decomposes every CPU cycle into exactly one of six non-overlapping
+categories, then converts to wall-clock time so the Time column sums to elapsed.
+
+### When to use
+
+Use this method whenever the user asks for:
+- "additive time analysis"
+- "latency decomposition"
+- "wall-clock time breakdown"
+- "where is the time going"
+- any request for a timing table that sums to wall clock
+
+This method works on **any single-threaded x86 workload**, not just Asian bump Greeks.
+
+### Step 1 — Collect perf events (single pass)
+
+All six CYCLE_ACTIVITY raw events plus `cycles` in one `perf stat` invocation.
+Pin to a single core and bind memory to local NUMA node for clean measurements.
+
+```bash
+perf stat -r 5 \
+  -e cycles,r01a3,r02a3,r04a3,r05a3,r06a3 \
+  -- taskset -c 0 numactl --membind=0 \
+  env OMP_NUM_THREADS=1 ./BINARY [ARGS]
+```
+
+### Step 2 — Event definitions (Intel GNR / DMR / SPR family, event 0xA3)
+
+| Raw code | Name | What it counts |
+|----------|------|----------------|
+| `r04a3`  | STALLS_L2_MISS | Cycles **stalled** (no uop dispatch) while ≥1 L2 miss is outstanding |
+| `r06a3`  | CYCLES_L3_MISS | **All** cycles (stall + execute) while ≥1 L3 miss is outstanding |
+| `r05a3`  | CYCLES_L2_MISS | **All** cycles (stall + execute) while ≥1 L2 miss is outstanding |
+| `r01a3`  | OOO_L2_MISS    | Cycles **executing** (OOO) while ≥1 L2 miss is outstanding |
+| `r02a3`  | OOO_L3_MISS    | Cycles **executing** (OOO) while ≥1 L3 miss is outstanding |
+| `cycles` | CPU_CLK_UNHALTED | Total unhalted CPU cycles |
+
+**Identity checks (must hold within ±1%):**
+```
+r05a3 = r04a3 + r01a3    (cycles_L2 = stalls_L2 + ooo_L2)
+r06a3 = STALLS_L3 + r02a3  (cycles_L3 = stalls_L3 + ooo_L3)
+```
+If these fail, the events have different semantics on this CPU — fall back to
+the 6-pass method above.
+
+### Step 3 — Decomposition formulas
+
+Six non-overlapping, exhaustive categories. Every cycle belongs to exactly one:
+
+```
+STALL_DRAM  = r06a3 - r02a3        # stall cycles waiting for DRAM (L3 miss)
+STALL_L3    = r04a3 - STALL_DRAM   # stall cycles waiting for L3 (L2 miss, L3 hit)
+              = r04a3 - r06a3 + r02a3
+STALL_C2C   = 0                     # eliminated when numactl --membind=0 is used
+OOO_L2      = r01a3 - r02a3        # executing while L2 miss pending (L3 hit)
+OOO_L3      = r02a3                 # executing while L3 miss pending (DRAM)
+PURE_EXEC   = cycles - r04a3 - r01a3  # no outstanding L2 miss
+```
+
+**Proof of additivity:**
+```
+STALL_DRAM + STALL_L3 + OOO_L2 + OOO_L3 + PURE_EXEC
+= (r06a3-r02a3) + (r04a3-r06a3+r02a3) + (r01a3-r02a3) + r02a3 + (cycles-r04a3-r01a3)
+= r06a3 - r02a3 + r04a3 - r06a3 + r02a3 + r01a3 - r02a3 + r02a3 + cycles - r04a3 - r01a3
+= cycles  ✓
+```
+
+**Clamping:** If `STALL_L3` or `OOO_L2` compute as negative (measurement noise
+when L3 hit rate ≈ 0%), clamp to zero and absorb the residual into the dominant
+adjacent category (STALL_DRAM or OOO_L3 respectively). Document when this occurs.
+
+### Step 4 — Convert to wall-clock time
+
+```
+Time_component = (component_cycles / total_cycles) × elapsed_seconds
+```
+
+This guarantees `sum(Time_component) = elapsed_seconds` exactly.
+
+### Step 5 — Output table format
+
+Always produce the table in exactly this format:
+
+```
+Wall Clock = {elapsed}s — Full Additive Breakdown
+
+ Category                          Cycles    % Wall   Time     Events used
+ ─────────────────────────────────────────────────────────────────────────
+ * STALL  DRAM fill  (L3→DRAM)    X.XXXB    XX.X%    X.XXXs   r04a3, r06a3
+ * STALL  L3 fill    (L2→L3 hit)  X.XXXB     X.X%    X.XXXs   r04a3, r05a3
+ * STALL  C2C        (remote)     X.XXXB     X.X%    X.XXXs   numactl --membind=0
+   OOO    L2 miss    (exec+fill)  X.XXXB     X.X%    X.XXXs   r01a3
+   OOO    L3 miss    (exec+fill)  X.XXXB     X.X%    X.XXXs   r02a3
+   Pure EXECUTE      (no L2 miss) X.XXXB    XX.X%    X.XXXs   residual
+ ─────────────────────────────────────────────────────────────────────────
+   Total CPU cycles               X.XXXB   100.0%    X.XXXs   ✓
+```
+
+**Formatting rules:**
+- Cycles in billions with 3 decimal places (e.g., `5.382B`)
+- Percentages with 1 decimal place
+- Time in seconds with 3 decimal places
+- Rows marked `*` are stall categories (bottleneck candidates)
+- Total line must show `100.0%` and `✓`
+- Sum of the Time column must equal the Wall Clock header value
+
+### Reference measurement (GNR 160C, May 2026)
+
+```
+Wall Clock = 2.534s — Full Additive Breakdown (mc_asian_bump_greeks.avx512, 1T)
+
+ Category                          Cycles    % Wall   Time     Events used
+ ─────────────────────────────────────────────────────────────────────────
+ * STALL  DRAM fill  (L3→DRAM)    5.133B    63.7%    1.614s   r04a3, r06a3
+ * STALL  L3 fill    (L2→L3 hit)  0.000B     0.0%    0.000s   r04a3, r05a3
+ * STALL  C2C        (remote)     0.000B     0.0%    0.000s   numactl --membind=0
+   OOO    L2 miss    (exec+fill)  0.332B     4.1%    0.104s   r01a3
+   OOO    L3 miss    (exec+fill)  0.005B     0.1%    0.002s   r02a3
+   Pure EXECUTE      (no L2 miss) 2.587B    32.1%    0.814s   residual
+ ─────────────────────────────────────────────────────────────────────────
+   Total CPU cycles               8.056B   100.0%    2.534s   ✓
+
+Note: STALL_L3 = 0% because working set (~10 GB) >> L3 capacity (1.1 GiB).
+      All L2 misses also miss L3 → r04a3 ≈ r06a3 within measurement noise.
+```
+
+### Earlier reference (DMR-AP, April 2026)
+
+```
+Wall Clock = 2.587s — Full Additive Breakdown (mc_asian_bump_greeks.avx512, 1T)
+
+ Category                          Cycles    % Wall   Time     Events used
+ ─────────────────────────────────────────────────────────────────────────
+ * STALL  DRAM fill  (L3→DRAM)    5.382B    65.5%    1.694s   r04a3, r06a3
+ * STALL  L3 fill    (L2→L3 hit)  0.315B     3.8%    0.099s   r04a3, r05a3
+ * STALL  C2C        (remote)     0.000B     0.0%    0.000s   numactl --membind=0
+   OOO    L2 miss    (exec+fill)  0.343B     4.2%    0.108s   r01a3
+   OOO    L3 miss    (exec+fill)  0.009B     0.1%    0.003s   r02a3
+   Pure EXECUTE      (no L2 miss) 2.172B    26.4%    0.683s   residual
+ ─────────────────────────────────────────────────────────────────────────
+   Total CPU cycles               8.221B   100.0%    2.587s   ✓
+```
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `r05a3 - r04a3 ≠ r01a3` (>5% off) | Events have different semantics on this CPU | Try cmask-encoded variants: `cpu/event=0xa3,umask=0x05,cmask=0x05/` etc. |
+| `STALL_L3` negative | L3 hit rate ≈ 0%, measurement noise | Clamp to 0; note in output |
+| `r02a3` has >15% variance | Very few L3-miss OOO cycles | Normal; increase `-r N` to ≥10 runs |
+| All `rXXa3` return 0 | Kernel lacks PMU support for this CPU | Check `perf_event_paranoid`; try running as root |
+| Sum ≠ 100.0% | Rounding | Use `cycles - r04a3 - r01a3` for PURE_EXEC (residual absorbs rounding) |
+
+---
+
+## Session 2026-04-24 — Prior Additive Time Budget Notes
 
 ### Budget summary (17-row merged table)
 Both configs fully decomposed — all cycles accounted for, identity proofs close exactly.
@@ -316,8 +472,3 @@ Both configs fully decomposed — all cycles accounted for, identity proofs clos
 - Loop-carried dep: `S *= exp(drift + sigma*z[t])` serialises 256 exp calls per path
 - Fix: log-sum reformulation → 1 exp call per path instead of 256
 - Expected next speedup: ~2× on top of current 3.05×
-
-### PMU model for MLP>1 (SIMD regime)
-- r0xA3 events accumulate per-outstanding-miss-per-cycle when MLP>1
-- Correction: use `r04a3/r0ca3` as stall *fraction*, multiply by `total_cycles`
-- Identity: `stall_corr + ooo_corr = total_cycles` ✓
